@@ -488,10 +488,10 @@ data:
               if [[ -f "${spath}" ]]; then
                 echo "${prefix}_KEY=$(cat "${spath}")" >> "${WS_CREDS}"
               fi
-              # SA JSON (for google-vertex-ai)
+              # SA JSON (for google-vertex-ai) — base64 encoded to avoid multiline issues
               local sa_path="/ws-secrets/${cred_secret}/sa_json"
               if [[ -f "${sa_path}" ]]; then
-                echo "${prefix}_SA_JSON=$(cat "${sa_path}")" >> "${WS_CREDS}"
+                echo "${prefix}_SA_JSON=$(base64 -w0 "${sa_path}")" >> "${WS_CREDS}"
               fi
             fi
           }
@@ -1128,9 +1128,9 @@ data:
             openshell provider delete "${FULL_PROV_NAME}" 2>/dev/null || true
 
             if [[ "${PROV_TYPE}" == "google-vertex-ai" && -n "${PROV_SA_JSON}" ]]; then
-              # Vertex AI with service account
+              # Vertex AI with service account (SA JSON is base64 encoded)
               SA_FILE="/tmp/${FULL_PROV_NAME}-sa.json"
-              echo "${PROV_SA_JSON}" > "${SA_FILE}"
+              echo "${PROV_SA_JSON}" | base64 -d > "${SA_FILE}"
               PROJECT_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('project_id',''))" "${SA_FILE}" 2>/dev/null || true)
               REGION="${PROV_REGION}"
               openshell provider create \
