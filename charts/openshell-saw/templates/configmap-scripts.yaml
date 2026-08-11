@@ -583,7 +583,7 @@ data:
       --secret-material-key private_key
 
     ok=0
-    for _ in $(seq 1 36); do
+    for _ in $(seq 1 6); do
       if openshell provider refresh status "${PROVIDER_NAME}" --credential-key GOOGLE_VERTEX_AI_SERVICE_ACCOUNT_TOKEN 2>/dev/null \
         | grep -qiE '[[:space:]]refreshed[[:space:]]'; then
         ok=1
