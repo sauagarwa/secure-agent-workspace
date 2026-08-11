@@ -1146,12 +1146,12 @@ data:
       fi
 
       # --- Create sandbox ---
-      SB_NAME="${WS_NAME}"
+      SB_NAME="${SANDBOX_NAME:-${WS_NAME}}"
       SB_IMAGE=""
       if [[ -f "${WS_DIR}/sandbox.yaml" ]]; then
-        SB_NAME=$(python3 "${PARSE}" get "${WS_DIR}/sandbox.yaml" name "${WS_NAME}")
+        SB_NAME=$(python3 "${PARSE}" get "${WS_DIR}/sandbox.yaml" name "${SB_NAME}")
         SB_IMAGE=$(python3 "${PARSE}" get "${WS_DIR}/sandbox.yaml" image "")
-        [[ -z "${SB_NAME}" ]] && SB_NAME="${WS_NAME}"
+        [[ -z "${SB_NAME}" ]] && SB_NAME="${SANDBOX_NAME:-${WS_NAME}}"
       fi
 
       CREATE_ARGS=(--name "${SB_NAME}")
