@@ -1128,10 +1128,11 @@ data:
 
           if [[ -n "${PROV_NAME}" && -n "${PROV_TYPE}" ]]; then
             echo "  Provider: ${FULL_PROV_NAME} (type=${PROV_TYPE}, model=${PROV_MODEL})"
+            openshell provider delete "${FULL_PROV_NAME}" 2>/dev/null || true
             CREATE_ARGS=(--name "${FULL_PROV_NAME}" --type "${PROV_TYPE}")
             [[ -n "${CRED_KEY}" && -n "${PROV_API_KEY}" ]] && CREATE_ARGS+=(--credential "${CRED_KEY}=${PROV_API_KEY}")
             openshell provider create "${CREATE_ARGS[@]}" 2>&1 || \
-              echo "  WARN: provider create failed (may already exist)"
+              echo "  WARN: provider create failed"
           fi
         done < <(python3 "${PARSE}" providers "${WS_DIR}/providers.yaml")
 
