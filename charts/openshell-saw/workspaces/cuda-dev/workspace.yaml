@@ -1,0 +1,7 @@
+apiVersion: saw.redhat.com/v1alpha1
+kind: Workspace
+metadata:
+  name: cuda-dev
+spec:
+  description: "OpenClaw CUDA development workspace"
+  agent: openclaw

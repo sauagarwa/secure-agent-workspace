@@ -462,19 +462,21 @@ data:
       guest_ssh "mkdir -p /home/${SSH_USER}/workspaces"
       for file in /workspaces/*; do
         key="$(basename "$file")"
-        ws_name="$(echo "$key" | awk -F'__' '{print $2}')"
-        ws_file="$(echo "$key" | awk -F'__' '{print $3}')"
-        if [[ -n "${ws_name}" && -n "${ws_file}" ]]; then
-          guest_ssh "mkdir -p /home/${SSH_USER}/workspaces/${ws_name}"
-          guest_scp "$file" "/home/${SSH_USER}/workspaces/${ws_name}/${ws_file}"
+        # Reconstruct path: workspaces__default__sandboxes__file.yaml → default/sandboxes/file.yaml
+        rel_path="$(echo "$key" | sed 's/^workspaces__//' | sed 's/__/\//g')"
+        dest_dir="$(dirname "${rel_path}")"
+        if [[ -n "${rel_path}" ]]; then
+          guest_ssh "mkdir -p /home/${SSH_USER}/workspaces/${dest_dir}"
+          guest_scp "$file" "/home/${SSH_USER}/workspaces/${rel_path}"
         fi
       done
       # Resolve provider credentials from mounted secrets
       WS_CREDS="${WORK_DIR}/ws-credentials.env"
       for file in /workspaces/*; do
         key="$(basename "$file")"
-        ws_name="$(echo "$key" | awk -F'__' '{print $2}')"
-        ws_file="$(echo "$key" | awk -F'__' '{print $3}')"
+        rel_path="$(echo "$key" | sed 's/^workspaces__//' | sed 's/__/\//g')"
+        ws_name="$(echo "$rel_path" | cut -d'/' -f1)"
+        ws_file="$(basename "$rel_path")"
         if [[ "${ws_file}" == "providers.yaml" ]]; then
           # Parse credentialSecret/credentialSecretKey from providers.yaml
           # and resolve credentials from mounted secrets
@@ -1145,33 +1147,42 @@ data:
         fi
       fi
 
-      # --- Create sandbox ---
-      SB_NAME="${SANDBOX_NAME:-${WS_NAME}}"
-      SB_IMAGE=""
-      if [[ -f "${WS_DIR}/sandbox.yaml" ]]; then
-        SB_NAME=$(python3 "${PARSE}" get "${WS_DIR}/sandbox.yaml" name "${SB_NAME}")
-        SB_IMAGE=$(python3 "${PARSE}" get "${WS_DIR}/sandbox.yaml" image "")
-        [[ -z "${SB_NAME}" ]] && SB_NAME="${SANDBOX_NAME:-${WS_NAME}}"
-      fi
-
-      CREATE_ARGS=(--name "${SB_NAME}")
-      if [[ -n "${SB_IMAGE}" ]]; then
-        CREATE_ARGS+=(--from "${SB_IMAGE}")
-        echo "  Pre-pulling sandbox image..."
-        sudo docker pull "${SB_IMAGE}" 2>&1 | tail -1 || true
-      elif [[ -n "${SANDBOX_IMAGE}" ]]; then
-        CREATE_ARGS+=(--from "${SANDBOX_IMAGE}")
-      fi
-
-      if ! openshell sandbox get "${SB_NAME}" >/dev/null 2>&1; then
-        echo "  Creating sandbox '${SB_NAME}'..."
-        openshell sandbox create "${CREATE_ARGS[@]}" --no-tty -- sh -c "echo sandbox-ready" || {
-          echo "  ERROR: sandbox creation failed for '${WS_NAME}'" >&2
-          continue
-        }
+      # --- Create sandboxes ---
+      SB_DIR="${WS_DIR}/sandboxes"
+      # Support both sandboxes/ directory (new) and single sandbox.yaml (legacy)
+      if [[ -d "${SB_DIR}" ]]; then
+        SB_FILES=("${SB_DIR}"/*.yaml)
+      elif [[ -f "${WS_DIR}/sandbox.yaml" ]]; then
+        SB_FILES=("${WS_DIR}/sandbox.yaml")
       else
-        echo "  Sandbox '${SB_NAME}' already exists"
+        SB_FILES=()
       fi
+
+      for SB_FILE in "${SB_FILES[@]}"; do
+        [[ -f "${SB_FILE}" ]] || continue
+        SB_NAME=$(python3 "${PARSE}" get "${SB_FILE}" name "${SANDBOX_NAME:-${WS_NAME}}")
+        SB_IMAGE=$(python3 "${PARSE}" get "${SB_FILE}" image "")
+        [[ -z "${SB_NAME}" ]] && SB_NAME="${SANDBOX_NAME:-${WS_NAME}}"
+
+        CREATE_ARGS=(--name "${SB_NAME}")
+        if [[ -n "${SB_IMAGE}" ]]; then
+          CREATE_ARGS+=(--from "${SB_IMAGE}")
+          echo "  Pre-pulling sandbox image..."
+          sudo docker pull "${SB_IMAGE}" 2>&1 | tail -1 || true
+        elif [[ -n "${SANDBOX_IMAGE}" ]]; then
+          CREATE_ARGS+=(--from "${SANDBOX_IMAGE}")
+        fi
+
+        if ! openshell sandbox get "${SB_NAME}" >/dev/null 2>&1; then
+          echo "  Creating sandbox '${SB_NAME}'..."
+          openshell sandbox create "${CREATE_ARGS[@]}" --no-tty -- sh -c "echo sandbox-ready" || {
+            echo "  ERROR: sandbox creation failed for '${SB_NAME}'" >&2
+            continue
+          }
+        else
+          echo "  Sandbox '${SB_NAME}' already exists"
+        fi
+      done
 
       echo "=== Workspace '${WS_NAME}' configured ==="
 

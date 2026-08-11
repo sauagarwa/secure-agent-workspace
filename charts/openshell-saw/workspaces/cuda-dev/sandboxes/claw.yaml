@@ -1,0 +1,7 @@
+apiVersion: saw.redhat.com/v1alpha1
+kind: Sandbox
+metadata:
+  workspace: cuda-dev
+spec:
+  name: claw
+  image: "quay.io/rh-ai-quickstart/nemoclaw-sandbox:v0.0.97-rhaiv.0"

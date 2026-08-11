@@ -1,0 +1,11 @@
+apiVersion: saw.redhat.com/v1alpha1
+kind: Providers
+metadata:
+  workspace: cuda-dev
+spec:
+  providers:
+    - name: inference
+      type: gemini
+      model: gemini-2.5-flash
+      credentialSecret: inference
+      credentialSecretKey: api_key
