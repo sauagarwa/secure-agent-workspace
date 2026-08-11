@@ -1118,7 +1118,7 @@ data:
 
           CRED_KEY=""
           case "${PROV_TYPE}" in
-            google-vertex-ai) CRED_KEY="GOOGLE_API_KEY" ;;
+            gemini|google-vertex-ai) CRED_KEY="GEMINI_API_KEY" ;;
             claude-code)      CRED_KEY="ANTHROPIC_API_KEY" ;;
             codex|openai)     CRED_KEY="OPENAI_API_KEY" ;;
             nvidia)           CRED_KEY="NVIDIA_API_KEY" ;;
