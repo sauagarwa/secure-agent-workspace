@@ -5,8 +5,7 @@ metadata:
 spec:
   providers:
     - name: inference
-      type: google-vertex-ai
+      type: gemini
       model: gemini-2.5-flash
       credentialSecret: inference
-      credentialSecretKey: sa_json
-      region: us-central1
+      credentialSecretKey: api_key
