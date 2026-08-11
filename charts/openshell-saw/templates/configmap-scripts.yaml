@@ -478,32 +478,7 @@ data:
         ws_name="$(echo "$rel_path" | cut -d'/' -f1)"
         ws_file="$(basename "$rel_path")"
         if [[ "${ws_file}" == "providers.yaml" ]]; then
-          RESOLVE_PY="${WORK_DIR}/resolve-creds.py"
-          cat > "${RESOLVE_PY}" << 'RESOLVEPY'
-    import yaml, sys, os, base64
-    raw = yaml.safe_load(open(sys.argv[1]))
-    spec = raw.get('spec', raw)
-    ws = sys.argv[2]
-    creds_file = sys.argv[3]
-    with open(creds_file, 'a') as out:
-        for p in spec.get('providers', []):
-            name = p.get('name', '')
-            secret = p.get('credentialSecret', '')
-            secret_key = p.get('credentialSecretKey', 'api_key')
-            if not name or not secret:
-                continue
-            prefix = ('WS_' + ws + '_PROV_' + name).upper().replace('-', '_')
-            spath = os.path.join('/ws-secrets', secret, secret_key)
-            if os.path.exists(spath):
-                with open(spath) as f:
-                    out.write(prefix + '_KEY=' + f.read().strip() + '\n')
-            sa_path = os.path.join('/ws-secrets', secret, 'sa_json')
-            if os.path.exists(sa_path):
-                with open(sa_path, 'rb') as f:
-                    encoded = base64.b64encode(f.read()).decode()
-                    out.write(prefix + '_SA_JSON=' + encoded + '\n')
-    RESOLVEPY
-          python3 "${RESOLVE_PY}" "$file" "$ws_name" "${WS_CREDS}"
+          python3 "${SCRIPTS_DIR}/resolve-creds.py" "$file" "$ws_name" "${WS_CREDS}"
         fi
       done
       if [[ -f "${WS_CREDS}" ]]; then
@@ -1004,6 +979,32 @@ data:
       printf '%s\n' "${SSH_PUBKEY}" >> "${HOME}/.ssh/authorized_keys"
     fi
     echo "pubkey_installed sandbox=${SANDBOX_NAME}"
+
+  resolve-creds.py: |
+    #!/usr/bin/env python3
+    """Resolve provider credentials from mounted K8s secrets."""
+    import yaml, sys, os, base64
+    raw = yaml.safe_load(open(sys.argv[1]))
+    spec = raw.get('spec', raw)
+    ws = sys.argv[2]
+    creds_file = sys.argv[3]
+    with open(creds_file, 'a') as out:
+        for p in spec.get('providers', []):
+            name = p.get('name', '')
+            secret = p.get('credentialSecret', '')
+            secret_key = p.get('credentialSecretKey', 'api_key')
+            if not name or not secret:
+                continue
+            prefix = ('WS_' + ws + '_PROV_' + name).upper().replace('-', '_')
+            spath = os.path.join('/ws-secrets', secret, secret_key)
+            if os.path.exists(spath):
+                with open(spath) as f:
+                    out.write(prefix + '_KEY=' + f.read().strip() + '\n')
+            sa_path = os.path.join('/ws-secrets', secret, 'sa_json')
+            if os.path.exists(sa_path):
+                with open(sa_path, 'rb') as f:
+                    encoded = base64.b64encode(f.read()).decode()
+                    out.write(prefix + '_SA_JSON=' + encoded + '\n')
 
   parse-bom.py: |
     #!/usr/bin/env python3
