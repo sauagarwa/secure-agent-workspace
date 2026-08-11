@@ -481,6 +481,8 @@ data:
           python3 "${SCRIPTS_DIR}/resolve-creds.py" "$file" "$ws_name" "${WS_CREDS}"
         fi
       done
+      # Remove stale credentials from previous runs
+      guest_ssh "rm -f /home/${SSH_USER}/ws-credentials.env" || true
       if [[ -f "${WS_CREDS}" ]]; then
         guest_scp "${WS_CREDS}" "/home/${SSH_USER}/ws-credentials.env"
         echo "Workspace credentials transferred."
