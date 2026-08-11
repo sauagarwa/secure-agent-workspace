@@ -1079,7 +1079,7 @@ data:
       VERTEX_AI_REGION="${VERTEX_AI_REGION:-global}"
       VERTEX_MODEL="${VERTEX_MODEL:-gemini-2.5-flash}"
       export SA_JSON PROVIDER_NAME VERTEX_AI_REGION VERTEX_MODEL SANDBOX_NAME NEMOCLAW_AGENT
-      "${HOME}/configure-vertex-user.sh"
+      "${HOME}/configure-vertex-user.sh" || echo "WARN: Vertex AI provider setup failed (token refresh may have timed out)"
     fi
 
     # Run nemoclaw onboard (handles both Vertex and direct providers)
