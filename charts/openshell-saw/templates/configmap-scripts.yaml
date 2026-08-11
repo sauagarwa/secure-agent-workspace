@@ -22,7 +22,7 @@ data:
 
     # --- Install dependencies (in the Job Pod, not the VM) ---
     echo "Installing openssh-clients..."
-    dnf install -y --setopt=install_weak_deps=False openssh-clients {{ if .Values.dashboard.enabled }}jq{{ end }}
+    dnf install -y --setopt=install_weak_deps=False openssh-clients python3 python3-pyyaml {{ if .Values.dashboard.enabled }}jq{{ end }}
 
     echo "Installing kubectl..."
     K8S_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
@@ -478,7 +478,6 @@ data:
         ws_name="$(echo "$rel_path" | cut -d'/' -f1)"
         ws_file="$(basename "$rel_path")"
         if [[ "${ws_file}" == "providers.yaml" ]]; then
-          pip3 install -q pyyaml 2>/dev/null || true
           RESOLVE_PY="${WORK_DIR}/resolve-creds.py"
           cat > "${RESOLVE_PY}" << 'RESOLVEPY'
     import yaml, sys, os, base64
