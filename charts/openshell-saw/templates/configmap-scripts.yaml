@@ -478,38 +478,35 @@ data:
         ws_name="$(echo "$rel_path" | cut -d'/' -f1)"
         ws_file="$(basename "$rel_path")"
         if [[ "${ws_file}" == "providers.yaml" ]]; then
-          # Parse credentialSecret/credentialSecretKey from providers.yaml
-          # and resolve credentials from mounted secrets
+          # Resolve all credential fields from mounted secrets
           prov_name="" cred_secret="" cred_key="api_key"
+          flush_provider() {
+            if [[ -n "${prov_name}" && -n "${cred_secret}" ]]; then
+              local prefix="$(echo "WS_${ws_name}_PROV_${prov_name}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+              # Main credential
+              local spath="/ws-secrets/${cred_secret}/${cred_key}"
+              if [[ -f "${spath}" ]]; then
+                echo "${prefix}_KEY=$(cat "${spath}")" >> "${WS_CREDS}"
+              fi
+              # SA JSON (for google-vertex-ai)
+              local sa_path="/ws-secrets/${cred_secret}/sa_json"
+              if [[ -f "${sa_path}" ]]; then
+                echo "${prefix}_SA_JSON=$(cat "${sa_path}")" >> "${WS_CREDS}"
+              fi
+            fi
+          }
           while IFS= read -r line; do
             case "$line" in
-              *"name:"*)     prov_name="$(echo "$line" | sed 's/.*name:[[:space:]]*//' | tr -d '"')" ;;
               *"credentialSecret:"*)  cred_secret="$(echo "$line" | sed 's/.*credentialSecret:[[:space:]]*//' | tr -d '"')" ;;
               *"credentialSecretKey:"*) cred_key="$(echo "$line" | sed 's/.*credentialSecretKey:[[:space:]]*//' | tr -d '"')" ;;
-              *"- name:"*|*"type:"*)
-                # Flush previous provider entry
-                if [[ -n "${prov_name}" && -n "${cred_secret}" ]]; then
-                  spath="/ws-secrets/${cred_secret}/${cred_key}"
-                  if [[ -f "${spath}" ]]; then
-                    val="$(cat "${spath}")"
-                    env_var="$(echo "WS_${ws_name}_PROV_${prov_name}_KEY" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
-                    echo "${env_var}=${val}" >> "${WS_CREDS}"
-                  fi
-                fi
+              *"- name:"*)
+                flush_provider
+                prov_name="$(echo "$line" | sed 's/.*name:[[:space:]]*//' | tr -d '"')"
                 cred_secret="" cred_key="api_key"
-                [[ "$line" == *"- name:"* ]] && prov_name="$(echo "$line" | sed 's/.*name:[[:space:]]*//' | tr -d '"')"
                 ;;
             esac
           done < "$file"
-          # Flush last provider
-          if [[ -n "${prov_name}" && -n "${cred_secret}" ]]; then
-            spath="/ws-secrets/${cred_secret}/${cred_key}"
-            if [[ -f "${spath}" ]]; then
-              val="$(cat "${spath}")"
-              env_var="$(echo "WS_${ws_name}_PROV_${prov_name}_KEY" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
-              echo "${env_var}=${val}" >> "${WS_CREDS}"
-            fi
-          fi
+          flush_provider
         fi
       done
       if [[ -f "${WS_CREDS}" ]]; then
@@ -1116,25 +1113,58 @@ data:
 
           CRED_VAR="WS_${WS_BOM}_PROV_${PROV_NAME}_KEY"
           CRED_VAR=$(echo "${CRED_VAR}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
-          PROV_API_KEY="${!CRED_VAR:-}"
+          PROV_CRED="${!CRED_VAR:-}"
 
-          CRED_KEY=""
-          case "${PROV_TYPE}" in
-            gemini|google-vertex-ai) CRED_KEY="GEMINI_API_KEY" ;;
-            claude-code)      CRED_KEY="ANTHROPIC_API_KEY" ;;
-            codex|openai)     CRED_KEY="OPENAI_API_KEY" ;;
-            nvidia)           CRED_KEY="NVIDIA_API_KEY" ;;
-            ollama)           CRED_KEY="" ;;
-            *)                CRED_KEY="API_KEY" ;;
-          esac
+          # SA JSON var (for google-vertex-ai)
+          SA_VAR="WS_${WS_BOM}_PROV_${PROV_NAME}_SA_JSON"
+          SA_VAR=$(echo "${SA_VAR}" | tr '-' '_' | tr '[:lower:]' '[:upper:]')
+          PROV_SA_JSON="${!SA_VAR:-}"
+
+          # Region from BOM providers.yaml
+          PROV_REGION=$(echo "${prov_json}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('region','us-central1'))" 2>/dev/null || echo "us-central1")
 
           if [[ -n "${PROV_NAME}" && -n "${PROV_TYPE}" ]]; then
             echo "  Provider: ${FULL_PROV_NAME} (type=${PROV_TYPE}, model=${PROV_MODEL})"
             openshell provider delete "${FULL_PROV_NAME}" 2>/dev/null || true
-            CREATE_ARGS=(--name "${FULL_PROV_NAME}" --type "${PROV_TYPE}")
-            [[ -n "${CRED_KEY}" && -n "${PROV_API_KEY}" ]] && CREATE_ARGS+=(--credential "${CRED_KEY}=${PROV_API_KEY}")
-            openshell provider create "${CREATE_ARGS[@]}" 2>&1 || \
-              echo "  WARN: provider create failed"
+
+            if [[ "${PROV_TYPE}" == "google-vertex-ai" && -n "${PROV_SA_JSON}" ]]; then
+              # Vertex AI with service account
+              SA_FILE="/tmp/${FULL_PROV_NAME}-sa.json"
+              echo "${PROV_SA_JSON}" > "${SA_FILE}"
+              PROJECT_ID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('project_id',''))" "${SA_FILE}" 2>/dev/null || true)
+              REGION="${PROV_REGION}"
+              openshell provider create \
+                --name "${FULL_PROV_NAME}" --type google-vertex-ai \
+                --credential "GOOGLE_SERVICE_ACCOUNT_KEY=$(cat "${SA_FILE}")" \
+                --config "VERTEX_AI_PROJECT_ID=${PROJECT_ID}" \
+                --config "VERTEX_AI_REGION=${REGION}" 2>&1 || \
+                echo "  WARN: provider create failed"
+              # Configure token refresh
+              CLIENT_EMAIL=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('client_email',''))" "${SA_FILE}" 2>/dev/null || true)
+              PRIVATE_KEY=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('private_key',''))" "${SA_FILE}" 2>/dev/null || true)
+              if [[ -n "${CLIENT_EMAIL}" && -n "${PRIVATE_KEY}" ]]; then
+                openshell provider refresh configure "${FULL_PROV_NAME}" \
+                  --credential-key GOOGLE_VERTEX_AI_SERVICE_ACCOUNT_TOKEN \
+                  --strategy google-service-account-jwt \
+                  --material "client_email=${CLIENT_EMAIL}" \
+                  --secret-material-key private_key 2>&1 || true
+              fi
+              shred -u "${SA_FILE}" 2>/dev/null || rm -f "${SA_FILE}"
+            else
+              # Standard API key provider
+              CRED_KEY=""
+              case "${PROV_TYPE}" in
+                claude-code|anthropic) CRED_KEY="ANTHROPIC_API_KEY" ;;
+                codex|openai)          CRED_KEY="OPENAI_API_KEY" ;;
+                nvidia)                CRED_KEY="NVIDIA_API_KEY" ;;
+                ollama)                CRED_KEY="" ;;
+                *)                     CRED_KEY="API_KEY" ;;
+              esac
+              CREATE_ARGS=(--name "${FULL_PROV_NAME}" --type "${PROV_TYPE}")
+              [[ -n "${CRED_KEY}" && -n "${PROV_CRED}" ]] && CREATE_ARGS+=(--credential "${CRED_KEY}=${PROV_CRED}")
+              openshell provider create "${CREATE_ARGS[@]}" 2>&1 || \
+                echo "  WARN: provider create failed"
+            fi
           fi
         done < <(python3 "${PARSE}" providers "${WS_DIR}/providers.yaml")
 
