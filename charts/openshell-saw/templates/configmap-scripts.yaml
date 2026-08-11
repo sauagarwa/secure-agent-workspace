@@ -998,10 +998,11 @@ data:
             if not name or not secret:
                 continue
             prefix = ('WS_' + ws + '_PROV_' + name).upper().replace('-', '_')
-            spath = os.path.join('/ws-secrets', secret, secret_key)
-            if os.path.exists(spath):
-                with open(spath) as f:
-                    out.write(prefix + '_KEY=' + f.read().strip() + '\n')
+            if secret_key != 'sa_json':
+                spath = os.path.join('/ws-secrets', secret, secret_key)
+                if os.path.exists(spath):
+                    with open(spath) as f:
+                        out.write(prefix + '_KEY=' + f.read().strip() + '\n')
             sa_path = os.path.join('/ws-secrets', secret, 'sa_json')
             if os.path.exists(sa_path):
                 with open(sa_path, 'rb') as f:
