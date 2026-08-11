@@ -66,6 +66,14 @@ spec:
     type: Dockerfile
     dockerfile: |
       FROM {{ (split ":" .Values.output.imageStreamTag)._0 }}-root:latest
+      {{- if .Values.build.otelPlugin.enabled }}
+      RUN openclaw plugins install clawhub:@openclaw/diagnostics-otel \
+          --acknowledge-clawhub-risk && \
+          STOCK_DIR="/usr/local/lib/nemoclaw/openclaw-runtime/node_modules/openclaw/dist/extensions" && \
+          cp -r /root/.openclaw/extensions/diagnostics-otel "$STOCK_DIR/" && \
+          chmod -R o+rX "$STOCK_DIR/diagnostics-otel" && \
+          rm -rf /root/.openclaw/extensions/diagnostics-otel
+      {{- end }}
       RUN chown -R sandbox:sandbox /sandbox
       USER sandbox
   strategy:
