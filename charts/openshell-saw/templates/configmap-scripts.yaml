@@ -1216,6 +1216,17 @@ data:
       if [[ -f "${HOME}/ws-credentials.env" ]]; then
         set -a; source "${HOME}/ws-credentials.env"; set +a
       fi
+      export OIDC_TOKEN="${OIDC_TOKEN:-}" OIDC_ISSUER="${OIDC_ISSUER:-}"
+      export OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-openshell-cli}"
+      export SANDBOX_IMAGE="${SANDBOX_IMAGE:-}"
+
+      # Register OIDC gateway if token available (needed for workspace member add)
+      if [[ -n "${OIDC_TOKEN:-}" ]]; then
+        echo "Registering OIDC gateway for workspace admin operations..."
+        openshell gateway add https://127.0.0.1:17670 --name openshell 2>/dev/null || true
+        openshell settings set --global --key providers_v2_enabled --value true --yes 2>/dev/null || true
+      fi
+
       "${HOME}/setup-workspaces.sh"
 
       SSH_PUBKEY="${SSH_PUBKEY}" SANDBOX_NAME="${SANDBOX_NAME}" "${HOME}/inject-user-pubkey.sh" || true
