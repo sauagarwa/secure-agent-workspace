@@ -424,6 +424,10 @@ data:
     # Inject provider, model, and API key from ESO-managed secret (mounted at /provider-secret)
     if [[ -f /provider-secret/provider ]]; then
       PROVIDER_FROM_SECRET="$(cat /provider-secret/provider)"
+      # Map openshell type to nemoclaw provider name
+      case "${PROVIDER_FROM_SECRET}" in
+        google-vertex-ai) PROVIDER_FROM_SECRET="gemini" ;;
+      esac
       if [[ -n "${PROVIDER_FROM_SECRET}" ]]; then
         echo "NEMOCLAW_PROVIDER=${PROVIDER_FROM_SECRET}" >> "${WORK_DIR}/run-create.env"
         echo "Injected provider from secret: ${PROVIDER_FROM_SECRET}"
@@ -583,7 +587,7 @@ data:
       --secret-material-key private_key
 
     ok=0
-    for _ in $(seq 1 6); do
+    for _ in $(seq 1 3); do
       if openshell provider refresh status "${PROVIDER_NAME}" --credential-key GOOGLE_VERTEX_AI_SERVICE_ACCOUNT_TOKEN 2>/dev/null \
         | grep -qiE '[[:space:]]refreshed[[:space:]]'; then
         ok=1
