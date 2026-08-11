@@ -4,4 +4,4 @@ metadata:
   workspace: default
 spec:
   name: ""
-  image: ""
+  image: "quay.io/rh-ai-quickstart/nemoclaw-sandbox:v0.0.97-rhaiv.0"
