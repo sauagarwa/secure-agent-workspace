@@ -1066,6 +1066,13 @@ data:
     fi
     echo "mTLS gateway '${MTLS_GW_NAME}' registered and selected"
 
+    # Grant mTLS client access via OIDC gateway (which has admin privileges)
+    GATEWAY_NAME="${OPENSHELL_GATEWAY:-openshell}"
+    OIDC_TOKEN="${OIDC_TOKEN:-}"
+    if [[ -n "${OIDC_TOKEN}" ]]; then
+      openshell gateway select "${GATEWAY_NAME}" >/dev/null 2>&1 || true
+    fi
+
     for WS_DIR in "${WS_BASE}"/*/; do
       [[ -f "${WS_DIR}/workspace.yaml" ]] || continue
       WS_BOM="$(basename "${WS_DIR}")"
@@ -1088,6 +1095,11 @@ data:
       openshell workspace member add --workspace "${WS_NAME}" \
         --subject openshell-client --role admin 2>&1 || \
         echo "  WARN: could not grant workspace access (may already be a member)"
+
+      # Switch back to mTLS for provider/sandbox operations
+      if [[ -n "${OIDC_TOKEN}" ]]; then
+        openshell gateway select "${MTLS_GW_NAME}" >/dev/null 2>&1 || true
+      fi
 
       # --- Create providers ---
       if [[ -f "${WS_DIR}/providers.yaml" ]]; then
@@ -1161,6 +1173,11 @@ data:
       fi
 
       echo "=== Workspace '${WS_NAME}' configured ==="
+
+      # Switch back to OIDC for next workspace's member add
+      if [[ -n "${OIDC_TOKEN}" ]]; then
+        openshell gateway select "${GATEWAY_NAME}" >/dev/null 2>&1 || true
+      fi
     done
 
     echo "setup-workspaces OK"
