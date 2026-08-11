@@ -476,23 +476,38 @@ data:
         ws_name="$(echo "$key" | awk -F'__' '{print $2}')"
         ws_file="$(echo "$key" | awk -F'__' '{print $3}')"
         if [[ "${ws_file}" == "providers.yaml" ]]; then
-          python3 << 'PYEOF' "$file" "$ws_name" >> "${WS_CREDS}" 2>/dev/null || true
-    import yaml, sys, os
-    raw = yaml.safe_load(open(sys.argv[1]))
-    spec = raw.get('spec', raw)
-    ws = sys.argv[2]
-    for p in spec.get('providers', []):
-        secret = p.get('credentialSecret', '')
-        secret_key = p.get('credentialSecretKey', 'api_key')
-        prov_name = p.get('name', '')
-        if secret and prov_name:
-            spath = os.path.join('/ws-secrets', secret, secret_key)
-            if os.path.exists(spath):
-                with open(spath) as f:
-                    val = f.read().strip()
-                env_var = ('WS_' + ws + '_PROV_' + prov_name + '_KEY').upper().replace('-','_')
-                print(env_var + '=' + val)
-    PYEOF
+          # Parse credentialSecret/credentialSecretKey from providers.yaml
+          # and resolve credentials from mounted secrets
+          prov_name="" cred_secret="" cred_key="api_key"
+          while IFS= read -r line; do
+            case "$line" in
+              *"name:"*)     prov_name="$(echo "$line" | sed 's/.*name:[[:space:]]*//' | tr -d '"')" ;;
+              *"credentialSecret:"*)  cred_secret="$(echo "$line" | sed 's/.*credentialSecret:[[:space:]]*//' | tr -d '"')" ;;
+              *"credentialSecretKey:"*) cred_key="$(echo "$line" | sed 's/.*credentialSecretKey:[[:space:]]*//' | tr -d '"')" ;;
+              *"- name:"*|*"type:"*)
+                # Flush previous provider entry
+                if [[ -n "${prov_name}" && -n "${cred_secret}" ]]; then
+                  spath="/ws-secrets/${cred_secret}/${cred_key}"
+                  if [[ -f "${spath}" ]]; then
+                    val="$(cat "${spath}")"
+                    env_var="$(echo "WS_${ws_name}_PROV_${prov_name}_KEY" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+                    echo "${env_var}=${val}" >> "${WS_CREDS}"
+                  fi
+                fi
+                cred_secret="" cred_key="api_key"
+                [[ "$line" == *"- name:"* ]] && prov_name="$(echo "$line" | sed 's/.*name:[[:space:]]*//' | tr -d '"')"
+                ;;
+            esac
+          done < "$file"
+          # Flush last provider
+          if [[ -n "${prov_name}" && -n "${cred_secret}" ]]; then
+            spath="/ws-secrets/${cred_secret}/${cred_key}"
+            if [[ -f "${spath}" ]]; then
+              val="$(cat "${spath}")"
+              env_var="$(echo "WS_${ws_name}_PROV_${prov_name}_KEY" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+              echo "${env_var}=${val}" >> "${WS_CREDS}"
+            fi
+          fi
         fi
       done
       if [[ -f "${WS_CREDS}" ]]; then
@@ -1037,6 +1052,19 @@ data:
       echo "No workspace BOMs found, skipping"
       exit 0
     fi
+
+    # Register mTLS gateway for local access (same as setup-nemoclaw.sh)
+    MTLS_GW_NAME="openshell-local"
+    openshell gateway remove "${MTLS_GW_NAME}" 2>/dev/null || true
+    if ! openshell gateway add https://127.0.0.1:17670 --name "${MTLS_GW_NAME}" --local 2>&1; then
+      echo "ERROR: failed to register mTLS gateway '${MTLS_GW_NAME}'" >&2
+      exit 1
+    fi
+    if ! openshell gateway select "${MTLS_GW_NAME}" 2>&1; then
+      echo "ERROR: failed to select mTLS gateway '${MTLS_GW_NAME}'" >&2
+      exit 1
+    fi
+    echo "mTLS gateway '${MTLS_GW_NAME}' registered and selected"
 
     for WS_DIR in "${WS_BASE}"/*/; do
       [[ -f "${WS_DIR}/workspace.yaml" ]] || continue
