@@ -1224,7 +1224,14 @@ data:
       if [[ -n "${OIDC_TOKEN:-}" ]]; then
         echo "Registering OIDC gateway for workspace admin operations..."
         openshell gateway add https://127.0.0.1:17670 --name openshell 2>/dev/null || true
-        openshell settings set --global --key providers_v2_enabled --value true --yes 2>/dev/null || true
+        OIDC_TOKEN_PATH="${HOME}/.config/openshell/gateways/openshell/oidc_token.json"
+        mkdir -p "$(dirname "${OIDC_TOKEN_PATH}")"
+        chmod 700 "$(dirname "${OIDC_TOKEN_PATH}")"
+        printf '{"access_token":"%s","issuer":"%s","client_id":"%s"}' \
+          "${OIDC_TOKEN}" "${OIDC_ISSUER:-}" "${OIDC_CLIENT_ID:-openshell-cli}" \
+          > "${OIDC_TOKEN_PATH}"
+        chmod 600 "${OIDC_TOKEN_PATH}"
+        echo "OIDC token injected for gateway auth"
       fi
 
       "${HOME}/setup-workspaces.sh"
