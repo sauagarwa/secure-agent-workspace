@@ -35,6 +35,20 @@ network_policies:
       - path: /usr/local/bin/curl
       - path: /usr/bin/node
       - path: /usr/local/bin/node
+  gemini:
+    name: gemini
+    endpoints:
+      - { host: generativelanguage.googleapis.com, port: 443 }
+      - { host: "*-aiplatform.googleapis.com", port: 443 }
+      - { host: cloudcode-pa.googleapis.com, port: 443 }
+      - { host: accounts.google.com, port: 443 }
+      - { host: oauth2.googleapis.com, port: 443 }
+      - { host: www.googleapis.com, port: 443 }
+      - { host: iamcredentials.googleapis.com, port: 443 }
+    binaries:
+      - { path: /usr/bin/gemini }
+      - { path: /usr/lib/node_modules/@google/gemini-cli/dist/index.js }
+      - { path: /usr/bin/node }
 
 process:
   run_as_user: sandbox
