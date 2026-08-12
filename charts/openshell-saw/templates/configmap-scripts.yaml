@@ -850,6 +850,9 @@ data:
       echo "Pre-pulling sandbox image..."
       sudo docker pull "${SANDBOX_IMAGE}" 2>&1 | tail -1 || true
     fi
+    if [[ "${NEMOCLAW_WEB_SEARCH_PROVIDER}" != "none" && -n "${NEMOCLAW_WEB_SEARCH_PROVIDER}" ]]; then
+      CREATE_ARGS+=(--provider web-search)
+    fi
     if ! openshell sandbox get "${SANDBOX_NAME}" >/dev/null 2>&1; then
       echo "Creating sandbox (image=${SANDBOX_IMAGE:-default}, agent=${NEMOCLAW_AGENT})..."
       if ! openshell sandbox create "${CREATE_ARGS[@]}" --no-tty -- sh -c "echo sandbox-ready"; then
