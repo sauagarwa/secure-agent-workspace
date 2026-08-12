@@ -812,7 +812,14 @@ data:
     fi
 
     # --- Enable provider profile policy composition ---
-    openshell settings set --global --key providers_v2_enabled --value true --yes 2>&1 || true
+    # Requires platform admin (OIDC gateway), not mTLS client.
+    if [[ -n "${OIDC_TOKEN:-}" ]]; then
+      openshell gateway select "${GATEWAY_NAME}" >/dev/null 2>&1 || true
+      openshell settings set --global --key providers_v2_enabled --value true --yes 2>&1 || true
+      openshell gateway select "${MTLS_GW_NAME}" >/dev/null 2>&1 || true
+    else
+      openshell settings set --global --key providers_v2_enabled --value true --yes 2>&1 || true
+    fi
 
     # --- Register web search provider on the gateway (governance access policy) ---
     if [[ "${NEMOCLAW_WEB_SEARCH_PROVIDER}" != "none" && -n "${NEMOCLAW_WEB_SEARCH_PROVIDER}" ]]; then
