@@ -19,3 +19,5 @@ endpoints:
 binaries:
   - /usr/bin/curl
   - /usr/local/bin/curl
+  - /usr/bin/node
+  - /usr/local/bin/node
