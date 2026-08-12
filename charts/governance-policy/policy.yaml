@@ -8,12 +8,6 @@ filesystem_policy:
 landlock:
   compatibility: best_effort
 
-network:
-  allowOutbound: true
-  allowedHosts:
-    - "api.search.brave.com"
-    - "api.tavily.com"
-
 process:
   run_as_user: sandbox
   run_as_group: sandbox
