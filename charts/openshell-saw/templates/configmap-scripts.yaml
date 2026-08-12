@@ -811,6 +811,9 @@ data:
       fi
     fi
 
+    # --- Enable provider profile policy composition ---
+    openshell settings set --global --key providers_v2_enabled --value true --yes 2>&1 || true
+
     # --- Register web search provider on the gateway (governance access policy) ---
     if [[ "${NEMOCLAW_WEB_SEARCH_PROVIDER}" != "none" && -n "${NEMOCLAW_WEB_SEARCH_PROVIDER}" ]]; then
       WS_PROVIDER_TYPE=""
