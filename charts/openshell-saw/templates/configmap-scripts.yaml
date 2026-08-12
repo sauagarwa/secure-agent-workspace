@@ -912,9 +912,19 @@ data:
         cfg.gateway.auth.token = '${OPENCLAW_TOKEN}';
         if (!cfg.gateway.controlUi) cfg.gateway.controlUi = {};
         cfg.gateway.controlUi.allowedOrigins = ['https://${DASHBOARD_ROUTE}'];
-        // Web search keys are passed via nemoclaw onboard env, not openclaw config.
-        // Injecting them here triggers openclaw plugin auto-install which fails
-        // when the sandbox proxy blocks npm access.
+        // Patch brave plugin API key from placeholder to real value
+        const braveKey = process.env.BRAVE_API_KEY;
+        if (braveKey && cfg.plugins && cfg.plugins.entries && cfg.plugins.entries.brave) {
+          cfg.plugins.entries.brave.config = cfg.plugins.entries.brave.config || {};
+          cfg.plugins.entries.brave.config.webSearch = cfg.plugins.entries.brave.config.webSearch || {};
+          cfg.plugins.entries.brave.config.webSearch.apiKey = braveKey;
+        }
+        const tavilyKey = process.env.TAVILY_API_KEY;
+        if (tavilyKey && cfg.plugins && cfg.plugins.entries && cfg.plugins.entries.tavily) {
+          cfg.plugins.entries.tavily.config = cfg.plugins.entries.tavily.config || {};
+          cfg.plugins.entries.tavily.config.webSearch = cfg.plugins.entries.tavily.config.webSearch || {};
+          cfg.plugins.entries.tavily.config.webSearch.apiKey = tavilyKey;
+        }
         fs.writeFileSync('/sandbox/.openclaw/openclaw.json', JSON.stringify(cfg, null, 2));
       " 2>/dev/null || echo "WARN: could not write openclaw config"
     # openclaw gateway reads the env section from openclaw.json on startup
