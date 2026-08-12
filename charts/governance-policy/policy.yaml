@@ -17,6 +17,11 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
+    binaries:
+      - path: /usr/bin/curl
+      - path: /usr/local/bin/curl
+      - path: /usr/bin/node
+      - path: /usr/local/bin/node
   tavily_search:
     name: tavily-search
     endpoints:
@@ -25,6 +30,11 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
+    binaries:
+      - path: /usr/bin/curl
+      - path: /usr/local/bin/curl
+      - path: /usr/bin/node
+      - path: /usr/local/bin/node
 
 process:
   run_as_user: sandbox
