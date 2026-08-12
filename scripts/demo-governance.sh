@@ -273,8 +273,65 @@ echo ""
 
 press_enter
 
-# --- 10. Cleanup ---
-banner "10. Cleanup"
+# --- 10. Web Search Governance ---
+banner "10. Web Search — Governed Network Access"
+
+step "Brave Search profile defines the allowed endpoint and binaries:"
+echo ""
+cat "${PROFILES_DIR}/brave.yaml" | sed 's/^/    /'
+echo ""
+
+press_enter
+
+step "The sandbox proxy blocks all outbound by default."
+step "To allow web search, we need three things:"
+echo ""
+echo -e "  1. ${BOLD}Provider profile${RESET} — brave.yaml defines api.search.brave.com"
+echo -e "  2. ${BOLD}Provider registration${RESET} — stores the API key on the gateway"
+echo -e "  3. ${BOLD}--provider flag${RESET} — merges profile endpoints into sandbox policy"
+echo ""
+
+press_enter
+
+step "Enable provider profile policy composition:"
+echo ""
+gw settings set --global --key providers_v2_enabled --value true --yes || true
+echo ""
+
+step "Register a Brave Search provider with a demo key:"
+echo ""
+gw provider create --name demo-brave --type brave --credential BRAVE_API_KEY=demo-key || true
+echo ""
+
+step "Create a sandbox with --provider demo-brave:"
+echo ""
+gw sandbox create --name demo-search --provider demo-brave --no-tty -- sh -c "echo sandbox-ready" || true
+echo ""
+
+press_enter
+
+step "Sandbox effective policy now includes the brave endpoint:"
+echo ""
+gw policy get demo-search --full 2>&1 | grep -A 5 "brave\|api.search" || echo "  (check with: openshell policy get demo-search --full)"
+echo ""
+
+step "The proxy allows CONNECT to api.search.brave.com:"
+echo ""
+run_on_vm "openshell sandbox exec -n demo-search --no-tty -- curl -s --max-time 5 -o /dev/null -w 'HTTP %{http_code}' https://api.search.brave.com/ 2>&1" || echo -e "  ${RED}(curl failed — sandbox may not be ready yet)${RESET}"
+echo ""
+
+press_enter
+
+step "Cleanup demo-search sandbox and demo-brave provider:"
+gw sandbox delete demo-search > /dev/null 2>&1 || true
+gw provider delete demo-brave > /dev/null 2>&1 || true
+echo -e "${GREEN}  Cleaned up.${RESET}"
+echo ""
+
+press_enter
+
+# --- 11. Cleanup ---
+banner "11. Cleanup"
 
 for p in demo-vertex demo-github demo-vertex-ok demo-github-restored demo-jira demo-jira-blocked; do
   gw provider delete "${p}" > /dev/null 2>&1 || true
@@ -299,6 +356,8 @@ echo -e "  ${GREEN}✓${RESET} Governed providers (google-vertex-ai, github) —
 echo -e "  ${RED}✗${RESET} Ungoverned providers (custom, claude-code) — ${RED}blocked${RESET}"
 echo -e "  ${YELLOW}!${RESET} Revoked profile (github removed) — ${RED}blocked until restored${RESET}"
 echo -e "  ${GREEN}✓${RESET} New profile added (jira) — ${GREEN}allowed after GitOps sync${RESET}"
+echo -e "  ${GREEN}✓${RESET} Web search (brave) — profile endpoints merged into sandbox policy"
+echo -e "  ${GREEN}✓${RESET} Sandbox proxy allows governed endpoints, blocks everything else"
 echo -e "  ${GREEN}✓${RESET} Policy separated from interceptor — just drop a profile YAML"
 echo -e "  ${GREEN}✓${RESET} Signed policy injected into sandbox creation (patch_count=2)"
 echo -e "  ${GREEN}✓${RESET} Full audit trail in gateway logs"
