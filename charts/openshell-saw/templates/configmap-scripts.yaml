@@ -858,6 +858,22 @@ data:
       fi
     fi
 
+    # --- Add web search endpoint to sandbox policy (proxy allowlist) ---
+    if [[ "${NEMOCLAW_WEB_SEARCH_PROVIDER}" != "none" && -n "${NEMOCLAW_WEB_SEARCH_PROVIDER}" ]]; then
+      WS_ENDPOINT=""
+      case "${NEMOCLAW_WEB_SEARCH_PROVIDER}" in
+        brave)  WS_ENDPOINT="api.search.brave.com:443:read-only:rest:enforce" ;;
+        tavily) WS_ENDPOINT="api.tavily.com:443:read-only:rest:enforce" ;;
+      esac
+      if [[ -n "${WS_ENDPOINT}" ]]; then
+        echo "Adding ${NEMOCLAW_WEB_SEARCH_PROVIDER} endpoint to sandbox policy..."
+        if ! openshell policy update "${SANDBOX_NAME}" \
+            --add-endpoint "${WS_ENDPOINT}" 2>&1; then
+          echo "WARN: could not add web-search endpoint to sandbox policy"
+        fi
+      fi
+    fi
+
     # --- Start openclaw gateway inside sandbox for GUI/TUI dashboard ---
     {{- $clusterDomain := "apps.example.com" }}
     {{- if .Values.global }}{{- if .Values.global.clusterDomain }}{{- $clusterDomain = .Values.global.clusterDomain }}{{- end }}{{- end }}
