@@ -8,6 +8,24 @@ filesystem_policy:
 landlock:
   compatibility: best_effort
 
+network_policies:
+  brave-search:
+    name: Brave Search
+    endpoints:
+      - host: api.search.brave.com
+        port: 443
+        protocol: https
+        access: read-only
+        enforcement: enforce
+  tavily-search:
+    name: Tavily Search
+    endpoints:
+      - host: api.tavily.com
+        port: 443
+        protocol: https
+        access: read-only
+        enforcement: enforce
+
 process:
   run_as_user: sandbox
   run_as_group: sandbox
