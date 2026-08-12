@@ -860,7 +860,7 @@ data:
     if [[ "${NEMOCLAW_WEB_SEARCH_PROVIDER}" != "none" && -n "${NEMOCLAW_WEB_SEARCH_PROVIDER}" ]]; then
       CREATE_ARGS+=(--provider "${NEMOCLAW_WEB_SEARCH_PROVIDER}")
       if openshell sandbox get "${SANDBOX_NAME}" >/dev/null 2>&1 \
-         && ! openshell sandbox provider list "${SANDBOX_NAME}" 2>/dev/null | grep -q "${NEMOCLAW_WEB_SEARCH_PROVIDER}"; then
+         && ! openshell sandbox provider list "${SANDBOX_NAME}" 2>/dev/null | awk '{print $1}' | grep -qx "${NEMOCLAW_WEB_SEARCH_PROVIDER}"; then
         echo "Recreating sandbox to attach ${NEMOCLAW_WEB_SEARCH_PROVIDER} provider..."
         openshell sandbox delete "${SANDBOX_NAME}" 2>&1 || true
       fi
