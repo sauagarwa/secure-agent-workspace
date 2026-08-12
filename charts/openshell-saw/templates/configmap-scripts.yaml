@@ -852,6 +852,11 @@ data:
     fi
     if [[ "${NEMOCLAW_WEB_SEARCH_PROVIDER}" != "none" && -n "${NEMOCLAW_WEB_SEARCH_PROVIDER}" ]]; then
       CREATE_ARGS+=(--provider web-search)
+      if openshell sandbox get "${SANDBOX_NAME}" >/dev/null 2>&1 \
+         && ! openshell sandbox provider list "${SANDBOX_NAME}" 2>/dev/null | grep -q web-search; then
+        echo "Recreating sandbox to attach web-search provider..."
+        openshell sandbox delete "${SANDBOX_NAME}" 2>&1 || true
+      fi
     fi
     if ! openshell sandbox get "${SANDBOX_NAME}" >/dev/null 2>&1; then
       echo "Creating sandbox (image=${SANDBOX_IMAGE:-default}, agent=${NEMOCLAW_AGENT})..."
