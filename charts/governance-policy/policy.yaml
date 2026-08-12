@@ -9,22 +9,22 @@ landlock:
   compatibility: best_effort
 
 network_policies:
-  brave-search:
-    name: Brave Search
+  brave_search:
+    name: brave-search
     endpoints:
       - host: api.search.brave.com
         port: 443
-        protocol: https
-        access: read-only
+        protocol: rest
         enforcement: enforce
-  tavily-search:
-    name: Tavily Search
+        access: full
+  tavily_search:
+    name: tavily-search
     endpoints:
       - host: api.tavily.com
         port: 443
-        protocol: https
-        access: read-only
+        protocol: rest
         enforcement: enforce
+        access: full
 
 process:
   run_as_user: sandbox
