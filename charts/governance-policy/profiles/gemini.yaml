@@ -7,6 +7,7 @@ credentials:
     env_vars: [GEMINI_API_KEY]
     required: true
     auth_style: query
+    query_param: key
 discovery:
   credentials: [api_key]
 endpoints:
