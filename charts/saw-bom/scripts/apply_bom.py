@@ -432,6 +432,9 @@ class WorkspaceDeployer:
             return
         # Profile already exists: upsert latest chart content so schema/header
         # fixes are applied even on existing clusters.
+        # Skip builtin profiles — they can't be updated.
+        if "source: builtin" in (out or ""):
+            return
         rv_match = re.search(r"resource_version:\s*([0-9]+)", out or "")
         profile_doc = load_yaml_file(profile_path)
         if rv_match:
