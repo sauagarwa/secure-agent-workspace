@@ -47,6 +47,18 @@ SSH_PUBKEY = $(shell cat "$(SSH_KEY_PATH).pub" 2>/dev/null)
 		exit 1; \
 	fi
 
+.check-governance:
+	@if [ "$(GOVERNANCE_ENABLED)" = "true" ]; then \
+		GOV_EP="http://governance-interceptor.$(NS).svc.cluster.local:18081"; \
+		if ! kubectl get deployment governance-interceptor -n $(NS) >/dev/null 2>&1; then \
+			echo "Error: GOVERNANCE_ENABLED=true but governance interceptor is not deployed in $(NS)."; \
+			echo "  Either deploy it:  make deploy-governance"; \
+			echo "  Or disable it:     export GOVERNANCE_ENABLED=false"; \
+			exit 1; \
+		fi; \
+		echo "Governance interceptor: deployed in $(NS)"; \
+	fi
+
 .check-ssh-key:
 	@test -f "$(SSH_KEY_PATH).pub" || { \
 		echo "Error: SSH key not found at $(SSH_KEY_PATH).pub"; \
@@ -95,7 +107,7 @@ SSH_PUBKEY = $(shell cat "$(SSH_KEY_PATH).pub" 2>/dev/null)
         test e2e-test configure-gmail-refresh \
         saw-delete sandbox-pre-delete delete-vms delete-all verify verify-keycloak verify-agent verify-integ \
         governance-list-profiles governance-add-profile governance-remove-profile governance-create-profile governance-demo \
-        status .check-saw-name .check-ssh-key .check-prereqs
+        status .check-saw-name .check-ssh-key .check-governance .check-prereqs
 
 ##@ Setup
 
@@ -562,7 +574,7 @@ deploy-bom: ## Deploy BOM profiles (configures workspaces, providers, sandboxes)
 	helm upgrade --install saw-bom $(BOM_CHART) \
 		--namespace $(NS)
 
-deploy-agent-vm: ## Deploy Agent VM (set AGENT_HOST= for a pre-existing VM)
+deploy-agent-vm: .check-governance ## Deploy Agent VM (set AGENT_HOST= for a pre-existing VM)
 	-@kubectl delete job $(AGENT_VM_NAME)-setup -n $(NS) 2>/dev/null
 	@if [ -n "$(AGENT_HOST)" ]; then \
 		$(SCRIPTS_DIR)/configure-vm.sh --role agent \
@@ -591,7 +603,7 @@ deploy-agent-vm: ## Deploy Agent VM (set AGENT_HOST= for a pre-existing VM)
 			$$([ -n "$$OIDC_URL" ] && echo "--set oidc.issuerUrl=$$OIDC_URL"); \
 	fi
 
-deploy-integ-vm: ## Deploy Integrations VM (set INTEG_HOST= for a pre-existing VM)
+deploy-integ-vm: .check-governance ## Deploy Integrations VM (set INTEG_HOST= for a pre-existing VM)
 	-@kubectl delete job $(INTEG_VM_NAME)-setup -n $(NS) 2>/dev/null
 	@if [ -n "$(INTEG_HOST)" ]; then \
 		$(SCRIPTS_DIR)/configure-vm.sh --role integ \

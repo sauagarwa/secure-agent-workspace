@@ -511,6 +511,21 @@ class WorkspaceDeployer:
                 return
 
         if sandbox.command:
+            # Write .env file for sandbox processes that read config from it
+            env_lines = []
+            bearer_sha = os.environ.get("INTER_VM_BEARER_SHA256", "")
+            if bearer_sha:
+                env_lines.append(f"INTER_VM_BEARER_SHA256={bearer_sha}")
+                env_lines.append("GMAIL_ACCESS_TOKEN=placeholder")
+            if env_lines:
+                env_content = "\\n".join(env_lines)
+                self.sh.run(
+                    ["openshell", "sandbox", "exec", "-n",
+                     sandbox.name] + ws_args + [
+                        "--no-tty", "--", "/bin/sh", "-c",
+                        f"printf '{env_content}\\n' > /sandbox/.env"
+                    ], check=False)
+
             log(f"Starting: {sandbox.command}")
             self.sh.run(
                 ["openshell", "sandbox", "exec", "-n",
