@@ -10,5 +10,6 @@ spec:
       credentialSecretKey: api_key
     - name: gmail-read-proxy
       type: gmail-read-proxy
+      credentialKey: GOG_ACCESS_TOKEN
       credentialSecret: inter-vm-bearer
       credentialSecretKey: bearer

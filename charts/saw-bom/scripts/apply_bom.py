@@ -52,6 +52,7 @@ class Sandbox:
     model: str = ""
     command: str = ""
     expose_port: int = 0
+    env: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -195,6 +196,7 @@ def parse_profiles(profiles_dir):
                         model=s.get("model", ""),
                         command=s.get("command", ""),
                         expose_port=s.get("exposePort", 0),
+                        env=s.get("env", {}),
                     ))
             profile.workspaces.append(ws)
         if profile.workspaces:
@@ -547,6 +549,8 @@ done
                 args += ["--workspace", workspace_name]
             for prov in sandbox.providers:
                 args += ["--provider", prov]
+            for k, v in sandbox.env.items():
+                args += ["--env", f"{k}={v}"]
             args += ["--no-tty", "--", "sh", "-c", "echo sandbox-ready"]
             rc, out, err = self.sh.run(args, check=False)
             combined = re.sub(r'\x1b\[[0-9;]*m', '',

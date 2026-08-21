@@ -9,6 +9,9 @@ spec:
       image: quay.io/redhat-et/openclaw:csb-openclaw-only-amd64-2026.08.20-1
       providers:
         - gmail-read-proxy
+      env:
+        GOG_GMAIL_BASE_URL: "http://openshell-saw-integ-gateway.__NAMESPACE__.svc.cluster.local:18080/"
+        GOG_READONLY: "1"
     - name: cuda-sandbox
       type: nemoclaw
       enabled: false
