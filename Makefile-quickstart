@@ -101,7 +101,7 @@ SSH_PUBKEY = $(shell cat "$(SSH_KEY_PATH).pub" 2>/dev/null)
 
 .PHONY: check-prereqs generate-keys inference-secret ssh-secret keycloak keycloak-issuer login whoami logout delete-keycloak \
         build-nemoclaw build-nemoclaw-cli build-openclaw-openshell build-gateway-docker build-gateway-podman copy-images \
-        deploy-config deploy-agent-vm deploy-integ-vm deploy-bom deploy-gov-profiles deploy-governance saw-create \
+        deploy-config deploy-agent-vm deploy-integ-vm deploy-bom deploy-gov-profiles deploy-governance bearer-secret saw-create \
         saw-ssh saw-logs saw-list saw-verify saw-tui saw-gui saw-configure-gateway \
         tui gui nemoclaw-tui nemoclaw-gui openclaw-tui openclaw-gui \
         test e2e-test configure-gmail-refresh \
@@ -561,7 +561,19 @@ deploy-governance: deploy-gov-profiles ## Deploy governance interceptor + profil
 	helm upgrade --install governance-interceptor charts/governance-interceptor \
 		--namespace $(NS)
 
-deploy-config: .check-ssh-key ssh-secret deploy-bom ## Create SSH secrets, BOM configmap, and inference secret (if API_KEY set)
+bearer-secret: ## Generate inter-VM bearer secret (idempotent)
+	@if kubectl get secret inter-vm-bearer -n $(NS) >/dev/null 2>&1; then \
+		echo "Bearer secret already exists."; \
+	else \
+		BEARER=$$(openssl rand -hex 32); \
+		BEARER_SHA=$$(printf '%s' "$$BEARER" | sha256sum | awk '{print $$1}'); \
+		kubectl create secret generic inter-vm-bearer -n $(NS) \
+			--from-literal=bearer="$$BEARER" \
+			--from-literal=sha256="$$BEARER_SHA"; \
+		echo "Bearer secret created."; \
+	fi
+
+deploy-config: .check-ssh-key ssh-secret deploy-bom bearer-secret ## Create SSH secrets, BOM configmap, inference secret, and bearer
 	@if [ -n "$(API_KEY)" ]; then \
 		$(MAKE) inference-secret; \
 	fi

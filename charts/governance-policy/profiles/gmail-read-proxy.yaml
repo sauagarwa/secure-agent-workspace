@@ -16,7 +16,7 @@ discovery:
   credentials: [access_token]
 
 endpoints:
-  - host: saw-integrations-gateway.__NAMESPACE__.svc.cluster.local
+  - host: openshell-saw-integ-gateway.__NAMESPACE__.svc.cluster.local
     port: 18080
     protocol: rest
     enforcement: enforce

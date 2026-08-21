@@ -402,7 +402,11 @@ class WorkspaceDeployer:
         if credential and cred_key:
             args += ["--credential", f"{cred_key}={credential}"]
         elif provider.credential_secret:
-            args += ["--runtime-credentials"]
+            log(f"ERROR: provider '{provider.name}' declares "
+                f"credentialSecret '{provider.credential_secret}', but no "
+                f"resolved credential was provided to apply_bom.py. "
+                f"Skipping create to avoid invalid runtime-credentials mode.")
+            return
         else:
             args += ["--from-existing"]
         self.sh.run(args, check=False)

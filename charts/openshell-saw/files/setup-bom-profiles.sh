@@ -72,7 +72,22 @@ for file in ${BOM_MOUNT}/*; do
             echo "${type_env_var}=$(cat "${ppath}")" >> "${BOM_ENV}"
           fi
         else
-          echo "  WARNING: credential for provider '${cur_name}' not found at ${spath}"
+          # Fallback: read directly from k8s secret when projected secret mount
+          # is empty/missing (timing or values drift). This avoids silently
+          # creating providers without credentials.
+          secret_val="$(kubectl get secret "${cur_secret}" -n "${NS}" -o jsonpath="{.data.${skey}}" 2>/dev/null | base64 -d 2>/dev/null || true)"
+          if [[ -n "${secret_val}" ]]; then
+            env_var="$(echo "PROV_${cur_name}_KEY" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+            echo "${env_var}=${secret_val}" >> "${BOM_ENV}"
+            echo "  Resolved via API: ${cur_name}"
+            provider_type_val="$(kubectl get secret "${cur_secret}" -n "${NS}" -o jsonpath='{.data.provider}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+            if [[ -n "${provider_type_val}" ]]; then
+              type_env_var="$(echo "PROV_${cur_name}_TYPE" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+              echo "${type_env_var}=${provider_type_val}" >> "${BOM_ENV}"
+            fi
+          else
+            echo "  WARNING: credential for provider '${cur_name}' not found at ${spath} and secret/${cur_secret}.${skey}"
+          fi
         fi
       fi
     }
