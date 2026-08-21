@@ -10,7 +10,7 @@ credentials:
     env_vars: [GOG_ACCESS_TOKEN]
     required: true
     auth_style: bearer
-    header_name: authorization
+    header_name: x-forge-read-bearer
 
 discovery:
   credentials: [access_token]

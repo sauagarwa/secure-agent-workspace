@@ -35,6 +35,7 @@ class Provider:
     type: str
     enabled: bool = True
     nemoclaw_provider: str = ""
+    credential_key: str = ""
     credential_secret: str = ""
     credential_secret_key: str = "api_key"
     model: str = ""
@@ -175,6 +176,7 @@ def parse_profiles(profiles_dir):
                         type=p["type"],
                         enabled=p.get("enabled", True),
                         nemoclaw_provider=p.get("nemoclawProvider", ""),
+                        credential_key=p.get("credentialKey", ""),
                         credential_secret=p.get("credentialSecret", ""),
                         credential_secret_key=p.get("credentialSecretKey", "api_key"),
                         model=p.get("model", ""),
@@ -398,7 +400,8 @@ class WorkspaceDeployer:
                 "--name", provider.name, "--type", provider.type]
         if workspace_name != "default":
             args += ["--workspace", workspace_name]
-        cred_key = PROVIDER_CRED_MAP.get(provider.type, "API_KEY")
+        cred_key = (provider.credential_key
+                    or PROVIDER_CRED_MAP.get(provider.type, "API_KEY"))
         if credential and cred_key:
             args += ["--credential", f"{cred_key}={credential}"]
         elif provider.credential_secret:
@@ -412,18 +415,33 @@ class WorkspaceDeployer:
         self.sh.run(args, check=False)
 
     def _import_profile_if_needed(self, profile_type):
-        """Import a provider profile if it exists in the governance profiles dir."""
-        rc, _, _ = self.sh.run(
+        """Import or update provider profile from governance profiles dir."""
+        rc, out, _ = self.sh.run(
             ["openshell", "provider", "profile", "export", profile_type],
             check=False)
-        if rc == 0:
-            return
         profile_path = self.governance_profiles_dir / f"{profile_type}.yaml"
-        if profile_path.exists():
+        if not profile_path.exists():
+            return
+        if rc != 0:
             log(f"  Importing provider profile '{profile_type}'")
             self.sh.run(
                 ["openshell", "provider", "profile", "import",
                  "-f", str(profile_path)], check=False)
+            return
+        # Profile already exists: upsert latest chart content so schema/header
+        # fixes are applied even on existing clusters.
+        rv_match = re.search(r"resource_version:\s*([0-9]+)", out or "")
+        profile_doc = load_yaml_file(profile_path)
+        if rv_match:
+            profile_doc["resource_version"] = int(rv_match.group(1))
+        tmp = Path(f"/tmp/provider-profile-{profile_type}.yaml")
+        tmp.write_text(
+            yaml.safe_dump(profile_doc, sort_keys=False), encoding="utf-8")
+        log(f"  Updating provider profile '{profile_type}'")
+        self.sh.run(
+            ["openshell", "provider", "profile", "update",
+             "--file", str(tmp), profile_type],
+            check=False)
 
     def _container_cmd(self):
         """Return the container runtime command (docker or podman)."""
@@ -444,6 +462,42 @@ class WorkspaceDeployer:
              f"systemctl --user disable {svc} 2>/dev/null; "
              f"rm -f ~/.config/systemd/user/{svc}; "
              f"systemctl --user daemon-reload"],
+            check=False)
+
+    def ensure_forward_supervisor(self, sandbox_name, expose_port):
+        """Keep `openshell forward` alive for exposed integration proxies."""
+        svc = f"openshell-forward-{sandbox_name}.service"
+        script = f"""#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+while true; do
+  if ! openshell forward list 2>/dev/null | grep -q '^{sandbox_name}[[:space:]].*[[:space:]]{expose_port}[[:space:]].*[[:space:]]running'; then
+    openshell forward stop {expose_port} {sandbox_name} >/dev/null 2>&1 || true
+    openshell forward start -d 0.0.0.0:{expose_port} {sandbox_name} >/tmp/{sandbox_name}-forward.log 2>&1 || true
+  fi
+  sleep 30
+done
+"""
+        self.sh.run(
+            ["bash", "-c",
+             "mkdir -p ~/.local/bin ~/.config/systemd/user && "
+             f"cat > ~/.local/bin/{svc}.sh << 'FWEOF'\n{script}FWEOF\n"
+             f"chmod +x ~/.local/bin/{svc}.sh && "
+             f"cat > ~/.config/systemd/user/{svc} << 'SVCEOF'\n"
+             "[Unit]\n"
+             f"Description=OpenShell forward supervisor for {sandbox_name}\n"
+             "After=network.target\n"
+             "[Service]\n"
+             f"ExecStart=%h/.local/bin/{svc}.sh\n"
+             "Restart=always\n"
+             "RestartSec=3\n"
+             "[Install]\n"
+             "WantedBy=default.target\n"
+             "SVCEOF\n"
+             "loginctl enable-linger $(whoami) 2>/dev/null || true && "
+             "systemctl --user daemon-reload && "
+             f"systemctl --user enable {svc} >/dev/null 2>&1 || true && "
+             f"systemctl --user restart {svc}"],
             check=False)
 
     def create_sandbox_generic(self, sandbox, workspace_name="default"):
@@ -520,7 +574,6 @@ class WorkspaceDeployer:
             bearer_sha = os.environ.get("INTER_VM_BEARER_SHA256", "")
             if bearer_sha:
                 env_lines.append(f"INTER_VM_BEARER_SHA256={bearer_sha}")
-                env_lines.append("GMAIL_ACCESS_TOKEN=placeholder")
             if env_lines:
                 env_content = "\\n".join(env_lines)
                 self.sh.run(
@@ -544,6 +597,8 @@ class WorkspaceDeployer:
                 ["openshell", "service", "expose", sandbox.name,
                  str(sandbox.expose_port), f"{sandbox.name}-svc"],
                 check=False)
+            if os.environ.get("ROLE") == "integrations":
+                self.ensure_forward_supervisor(sandbox.name, sandbox.expose_port)
 
 
     def install_nemoclaw_cli(self, cli_image):

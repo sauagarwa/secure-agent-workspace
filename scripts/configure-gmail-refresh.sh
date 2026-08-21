@@ -22,7 +22,6 @@
 #   SSH_KEY_PATH       — SSH private key (default: ~/.generated-ssh-keys/sandbox-ssh)
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NS="${NS:-$(oc project -q 2>/dev/null || echo openshell-agents)}"
 INTEGRATIONS_VM="${INTEGRATIONS_VM:-openshell-saw-integ}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-${HOME}/.generated-ssh-keys/sandbox-ssh}"
@@ -198,18 +197,37 @@ openshell provider refresh configure gmail-read \
   --material "client_id=${GOG_CLIENT_ID}" \
   --secret-material-env client_secret=GOG_CLIENT_SECRET \
   --secret-material-env refresh_token=GOG_REFRESH_TOKEN
+if openshell provider get gmail-read -v 2>/dev/null | grep -q "Credential keys:.*API_KEY"; then
+  openshell provider refresh configure gmail-read \
+    --credential-key API_KEY \
+    --strategy oauth2-refresh-token \
+    --material "client_id=${GOG_CLIENT_ID}" \
+    --secret-material-env client_secret=GOG_CLIENT_SECRET \
+    --secret-material-env refresh_token=GOG_REFRESH_TOKEN
+fi
 echo "  Refresh configured."'
 
 # --- Step 4: Rotate and verify ---
 echo "Rotating token..."
 ssh_cmd 'export PATH="$HOME/.local/bin:$PATH"
 openshell provider refresh rotate gmail-read --credential-key GMAIL_ACCESS_TOKEN'
+ssh_cmd 'export PATH="$HOME/.local/bin:$PATH"
+if openshell provider get gmail-read -v 2>/dev/null | grep -q "Credential keys:.*API_KEY"; then
+  openshell provider refresh rotate gmail-read --credential-key API_KEY
+fi'
 
 echo "Checking refresh status..."
 ssh_cmd 'export PATH="$HOME/.local/bin:$PATH"
 openshell provider refresh status gmail-read'
 
-# --- Step 5: Clean up credential files on VM ---
+# --- Step 5: Sanity-check proxy path locally on integrations VM ---
+BEARER="$(kubectl get secret inter-vm-bearer -n "${NS}" -o jsonpath='{.data.bearer}' 2>/dev/null | base64 -d || true)"
+if [[ -n "${BEARER}" ]]; then
+  echo "Validating proxy endpoint with inter-VM bearer..."
+  ssh_cmd "code=\$(curl -sS -o /tmp/gmail-proxy-check.out -w '%{http_code}' -H 'x-forge-read-bearer: ${BEARER}' 'http://127.0.0.1:18080/gmail/v1/users/me/profile' || true); echo \"  proxy status: \${code}\"; cat /tmp/gmail-proxy-check.out 2>/dev/null || true"
+fi
+
+# --- Step 6: Clean up credential files on VM ---
 echo "Cleaning up credential files on VM..."
 ssh_cmd "rm -f /tmp/gog-client-secret.json /tmp/gog-token-export.json /tmp/gmail-read-profile-v2.yaml"
 

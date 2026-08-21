@@ -41,4 +41,5 @@ binaries:
   - /usr/bin/curl
   - /usr/local/bin/curl
   - /usr/local/bin/node
+  - /sandbox/rust-email-proxy
   - /sandbox/gmail-read-proxy

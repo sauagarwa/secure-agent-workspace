@@ -6,3 +6,4 @@ spec:
   providers:
     - name: gmail-read
       type: gmail-read
+      credentialKey: GMAIL_ACCESS_TOKEN

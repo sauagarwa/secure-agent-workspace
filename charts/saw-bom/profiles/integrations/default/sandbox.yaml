@@ -6,8 +6,8 @@ spec:
     - name: mail-proxy
       type: generic
       enabled: true
-      image: quay.io/sallyom/gmail-read-proxy:latest
-      command: "/sandbox/gmail-read-proxy"
+      image: quay.io/sallyom/forge-gmail-read-proxy@sha256:dfb6ba5c61745c564035ea49b4e95ed2b21132b49c279c046e8e15e5e9b00f20
+      command: "/sandbox/rust-email-proxy"
       exposePort: 18080
       providers:
         - gmail-read

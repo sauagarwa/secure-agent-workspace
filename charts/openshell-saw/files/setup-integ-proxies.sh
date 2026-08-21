@@ -141,7 +141,7 @@ echo "Setting up inference reverse proxy on port ${INFERENCE_PROXY_PORT}..."
 
 # Read API key from mounted Secret first, fall back to Helm value
 NVIDIA_API_KEY_VALUE=""
-SECRET_PATH="/ws-secrets/{{ .Values.inference.secretName | default "inference" }}/api_key"
+SECRET_PATH='/ws-secrets/{{ .Values.inference.secretName | default "inference" }}/api_key'
 if [[ -f "${SECRET_PATH}" ]]; then
   NVIDIA_API_KEY_VALUE="$(cat "${SECRET_PATH}")"
   echo "  Inference API key read from Secret"
