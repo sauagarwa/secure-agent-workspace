@@ -6,9 +6,9 @@ spec:
     - name: notebook
       type: openclaw
       enabled: true
-      image: quay.io/rh-ai-quickstart/openclaw-openshell:latest
+      image: quay.io/redhat-et/openclaw:csb-openclaw-only-amd64-2026.08.20-1
       providers:
-        - nvidia
+        - gmail-read-proxy
     - name: cuda-sandbox
       type: nemoclaw
       enabled: false

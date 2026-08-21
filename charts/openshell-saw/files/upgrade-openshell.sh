@@ -63,15 +63,18 @@ fi
 # --- Install lsof (needed by nemoclaw for gateway listener identification) ---
 guest_ssh "sudo dnf install -y lsof 2>&1 | tail -3" || echo "WARN: lsof install failed (non-fatal)"
 
-# --- Patch OIDC issuer ---
-source "${SECRETS_DIR}/run-create.env" 2>/dev/null || true
-if [[ -n "${OIDC_ISSUER:-}" ]]; then
-  echo "Patching OIDC issuer to ${OIDC_ISSUER}..."
-  guest_ssh "sudo sed -i 's|issuer = \".*\"|issuer = \"${OIDC_ISSUER}\"|' /etc/openshell/gateway.toml 2>/dev/null || true" || true
-  guest_ssh "sed -i 's|issuer = \".*\"|issuer = \"${OIDC_ISSUER}\"|' ~/.config/openshell/gateway.toml 2>/dev/null || true" || true
-  guest_ssh "grep -v '^OPENSHELL_OIDC_ISSUER' ~/.config/openshell/gateway.env > /tmp/genv.tmp 2>/dev/null && mv /tmp/genv.tmp ~/.config/openshell/gateway.env; echo 'OPENSHELL_OIDC_ISSUER=${OIDC_ISSUER}' >> ~/.config/openshell/gateway.env" || true
-  guest_ssh "MFILE=~/.config/openshell/gateways/openshell/metadata.json; [[ -f \"\${MFILE}\" ]] && sed -i 's|\"oidc_issuer\":\"[^\"]*\"|\"oidc_issuer\":\"${OIDC_ISSUER}\"|' \"\${MFILE}\" || true" || true
-  echo "OIDC config patched"
+# OIDC issuer is patched at the end of run-setup.sh (after all setup phases
+# complete over mTLS) so that provider/sandbox creation is not blocked.
+
+# --- Strip governance config if disabled (avoids VM rebuild) ---
+if [[ "${GOVERNANCE_ENABLED}" != "true" ]]; then
+  guest_ssh "
+    TOML=\$HOME/.config/openshell/gateway.toml
+    if [[ -f \${TOML} ]] && grep -q 'interceptors' \${TOML}; then
+      sed -i '/\[openshell.gateway\]/,\$d' \${TOML}
+      echo 'Stripped governance interceptor config from gateway.toml'
+    fi
+  " || true
 fi
 
 # --- Restart gateway with new binaries ---
@@ -79,7 +82,7 @@ echo "Restarting gateway service..."
 guest_ssh "systemctl --user restart openshell-gateway.service" || true
 GW_READY=0
 for i in $(seq 1 10); do
-  if guest_ssh "systemctl --user is-active openshell-gateway.service" 2>/dev/null; then
+  if [[ "$(guest_ssh "systemctl --user is-active openshell-gateway.service" 2>/dev/null || true)" == "active" ]]; then
     GW_READY=1; break
   fi
   echo "  waiting for gateway... (attempt $i)"
@@ -88,4 +91,42 @@ done
 if [[ "${GW_READY}" -ne 1 ]]; then
   echo "WARN: gateway did not restart after upgrade"
   guest_ssh "journalctl --user -u openshell-gateway.service --no-pager 2>/dev/null | tail -5" || true
+else
+  # Wait for gateway to accept connections (systemd active != port ready)
+  for i in $(seq 1 15); do
+    if guest_ssh "curl -sk --max-time 2 https://127.0.0.1:17670/healthz >/dev/null 2>&1" 2>/dev/null; then
+      echo "Gateway healthy"
+      break
+    fi
+    echo "  waiting for gateway port... (attempt $i)"
+    sleep 2
+  done
 fi
+
+# --- Regenerate client cert with OU=openshell-admin for platform admin access ---
+# The default cert has OU=openshell-user which lacks admin permissions when OIDC
+# is enabled. Re-sign with the existing CA to grant platform admin via mTLS.
+# Runs after gateway start so generate-certs has created the CA.
+echo "Regenerating mTLS client cert with admin role..."
+guest_ssh "
+  TLS_DIR=\$HOME/.local/state/openshell/tls
+  CA_CERT=\${TLS_DIR}/ca.crt
+  CA_KEY=\${TLS_DIR}/ca.key
+  CLIENT_DIR=\${TLS_DIR}/client
+  if [[ -f \${CA_KEY} && -f \${CA_CERT} ]]; then
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+      -keyout \${CLIENT_DIR}/tls.key \
+      -subj '/CN=openshell-client/OU=openshell-admin' \
+      -out /tmp/client.csr 2>/dev/null
+    openssl x509 -req -in /tmp/client.csr \
+      -CA \${CA_CERT} -CAkey \${CA_KEY} -CAcreateserial \
+      -days 3650 -out \${CLIENT_DIR}/tls.crt 2>/dev/null
+    rm -f /tmp/client.csr
+    for gw_dir in \$HOME/.config/openshell/gateways/*/mtls; do
+      [[ -d \${gw_dir} ]] && cp \${CLIENT_DIR}/tls.crt \${CLIENT_DIR}/tls.key \${gw_dir}/
+    done
+    echo 'Client cert regenerated: OU=openshell-admin'
+  else
+    echo 'WARN: CA key not found, skipping cert regeneration'
+  fi
+" || echo "WARN: client cert regeneration failed (non-fatal)"

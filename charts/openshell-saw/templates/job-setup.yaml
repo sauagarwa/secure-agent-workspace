@@ -20,7 +20,7 @@ spec:
     spec:
       serviceAccountName: {{ include "openshell-sandbox.fullname" . }}-setup
       restartPolicy: OnFailure
-      {{- if .Values.job.waitForSecrets }}
+      {{- if and .Values.job.waitForSecrets (eq .Values.role "standalone") }}
       initContainers:
         - name: wait-for-secrets
           image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
@@ -88,6 +88,9 @@ spec:
               mountPath: /ws-secrets/{{ $name }}
               readOnly: true
             {{- end }}
+            - name: governance-profiles
+              mountPath: /governance-profiles
+              readOnly: true
       volumes:
         - name: scripts
           configMap:
@@ -123,3 +126,7 @@ spec:
             secretName: {{ $name }}
             optional: true
         {{- end }}
+        - name: governance-profiles
+          configMap:
+            name: governance-interceptor-profiles
+            optional: true

@@ -7,6 +7,10 @@
 BOM_CM="saw-bom-profiles"
 BOM_MOUNT="/tmp/bom-profiles"
 if ! kubectl get configmap "${BOM_CM}" -n "${NS}" >/dev/null 2>&1; then
+  if [[ "${ROLE}" == "agent" ]]; then
+    echo "ERROR: BOM profiles ConfigMap (${BOM_CM}) required for agent role — cannot provision sandboxes."
+    exit 1
+  fi
   echo "WARNING: No BOM profiles ConfigMap (${BOM_CM}) found — no workspaces or sandboxes will be provisioned."
   echo "WARNING: Deploy the saw-bom chart to configure workspaces and providers."
   echo "WARNING: The VM is running but has no agent sandboxes configured."
@@ -25,9 +29,9 @@ done
 cp "${SECRETS_DIR}/run-create.env" "${WORK_DIR}/run-create.env"
 source "${WORK_DIR}/run-create.env" 2>/dev/null || true
 
-# Transfer BOM app + profiles to VM
+# Transfer BOM app + profiles to VM (clean old data first)
 BOM_DIR="/home/${SSH_USER}/bom-profiles"
-guest_ssh "mkdir -p ${BOM_DIR}"
+guest_ssh "rm -rf ${BOM_DIR} && mkdir -p ${BOM_DIR}"
 for file in ${BOM_MOUNT}/*; do
   key="$(basename "$file")"
   if [[ "${key}" == "apply_bom.py" ]]; then
@@ -57,27 +61,18 @@ for file in ${BOM_MOUNT}/*; do
     _flush_prov() {
       if [[ -n "${cur_name:-}" && -n "${cur_secret:-}" ]]; then
         skey="${cur_key:-api_key}"
-        # Every credentialSecret a BOM profile declares is mounted dynamically
-        # at /ws-secrets/<name> (see job-setup.yaml's additionalProviderSecrets
-        # loop) — this used to also fall back to a hardcoded /search-secret
-        # path regardless of the declared name, which silently broke if a
-        # tenant renamed their secret; that path is gone now, the declared
-        # name is what actually controls resolution.
         spath="/ws-secrets/${cur_secret}/${skey}"
         if [[ -f "${spath}" ]]; then
           env_var="$(echo "PROV_${cur_name}_KEY" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
           echo "${env_var}=$(cat "${spath}")" >> "${BOM_ENV}"
           echo "  Resolved: ${cur_name}"
-          # Also surface the secret's own "provider" field (e.g. "gemini",
-          # "build") if present, so apply_bom.py can validate it against
-          # the BOM profile's declared type before creating the provider.
           ppath="/ws-secrets/${cur_secret}/provider"
           if [[ -f "${ppath}" ]]; then
             type_env_var="$(echo "PROV_${cur_name}_TYPE" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
             echo "${type_env_var}=$(cat "${ppath}")" >> "${BOM_ENV}"
           fi
         else
-          echo "  WARNING: credential for provider '${cur_name}' not found at ${spath} — is '${cur_secret}' listed in additionalProviderSecrets (openshell-saw values) or is it the primary inference.secretName?"
+          echo "  WARNING: credential for provider '${cur_name}' not found at ${spath}"
         fi
       fi
     }
@@ -97,35 +92,24 @@ for file in ${BOM_MOUNT}/*; do
   fi
 done
 
-# Fetch OIDC token from Keycloak
-if [[ -z "${OIDC_TOKEN:-}" ]]; then
-  if [[ -n "${OIDC_ISSUER_URL}" && -n "${OWNER}" ]]; then
-    KEYCLOAK_SECRET="$(kubectl get secret ${KEYCLOAK_NAME}-initial-admin \
-      -n ${KEYCLOAK_NS} \
-      -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
-    if [[ -n "${KEYCLOAK_SECRET}" ]]; then
-      TOKEN_RESPONSE=$(curl -sk -X POST \
-        "${OIDC_ISSUER_URL}/protocol/openid-connect/token" \
-        -d "grant_type=password" \
-        -d "client_id=openshell-cli" \
-        -d "username=${OWNER}" \
-        -d "password=${OWNER}" \
-        -d "scope=openid" 2>/dev/null || true)
-      OIDC_TOKEN=$(echo "${TOKEN_RESPONSE}" | jq -r '.access_token // empty')
-      if [[ -n "${OIDC_TOKEN}" ]]; then
-        echo "OIDC token obtained for ${OWNER}"
-      else
-        echo "WARNING: OIDC token fetch failed for '${OWNER}': $(echo "${TOKEN_RESPONSE}" | jq -r '.error_description // .error // "no response / unparseable response"')"
-      fi
-    else
-      echo "WARNING: could not read secret ${KEYCLOAK_NAME}-initial-admin in namespace ${KEYCLOAK_NS} — skipping OIDC token fetch. Check dashboard.keycloakNamespace if Keycloak isn't co-located with this sandbox."
-    fi
-  fi
+# All admin operations use mTLS with OU=openshell-admin cert — no OIDC token needed.
+echo "NAMESPACE=${NS}" >> "${BOM_ENV}"
+
+# Pass inference config to VM for openclaw onboard.
+# Prefer env vars from run-create.env, fall back to mounted inference secret.
+INF_PROVIDER="${INFERENCE_PROVIDER:-}"
+INF_MODEL="${INFERENCE_MODEL:-}"
+if [[ -z "${INF_PROVIDER}" && -f /provider-secret/provider ]]; then
+  INF_PROVIDER="$(cat /provider-secret/provider)"
 fi
-[[ -n "${OIDC_TOKEN:-}" ]] && echo "OIDC_TOKEN=${OIDC_TOKEN}" >> "${BOM_ENV}"
-echo "OIDC_ISSUER=${OIDC_ISSUER_URL}" >> "${BOM_ENV}"
-echo "OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-openshell-cli}" >> "${BOM_ENV}"
-echo "OPENSHELL_GATEWAY=${OPENSHELL_GATEWAY:-openshell}" >> "${BOM_ENV}"
+if [[ -z "${INF_MODEL}" && -f /provider-secret/model ]]; then
+  INF_MODEL="$(cat /provider-secret/model)"
+fi
+[[ -n "${INF_PROVIDER}" ]] && echo "INFERENCE_PROVIDER=${INF_PROVIDER}" >> "${BOM_ENV}"
+[[ -n "${INF_MODEL}" ]] && echo "INFERENCE_MODEL=${INF_MODEL}" >> "${BOM_ENV}"
+
+# Inference routes through the supervisor via inference.local (default in apply_bom.py).
+# The inference-proxy provider on the gateway handles routing to the integ VM.
 
 # Nemoclaw CLI image
 REGISTRY_ROUTE="$(kubectl get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}' 2>/dev/null || true)"
@@ -134,6 +118,16 @@ if [[ -n "${REGISTRY_ROUTE}" && -n "${NEMOCLAW_CLI_IMAGE}" ]]; then
 fi
 
 guest_scp "${BOM_ENV}" "/home/${SSH_USER}/bom.env"
+
+# Transfer governance profiles to VM (for provider profile import)
+GOV_PROFILES_VM="/home/${SSH_USER}/governance-profiles"
+guest_ssh "mkdir -p ${GOV_PROFILES_VM}"
+if [[ -d /governance-profiles ]]; then
+  for file in /governance-profiles/*.yaml; do
+    [[ -f "$file" ]] && guest_scp "$file" "${GOV_PROFILES_VM}/$(basename "$file")"
+  done
+  echo "Governance profiles transferred to VM"
+fi
 
 # Compute dashboard route for openclaw gateway inside sandboxes
 DASHBOARD_ROUTE_HOST="$(kubectl get route "${VM_NAME}-dashboard" -n "${NS}" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
@@ -144,10 +138,25 @@ guest_ssh "
   set -a; source /home/${SSH_USER}/bom.env 2>/dev/null; set +a
   python3 /home/${SSH_USER}/apply_bom.py \
     --profiles-dir ${BOM_DIR} \
-    --oidc-gateway \${OPENSHELL_GATEWAY:-openshell} \
     --mtls-gateway openshell-local \
     --nemoclaw-cli-image \${NEMOCLAW_CLI_IMAGE:-} \
-    --dashboard-route '${DASHBOARD_ROUTE_HOST}'
+    --dashboard-route '${DASHBOARD_ROUTE_HOST}' \
+    --governance-profiles-dir ${GOV_PROFILES_VM}
 " 2>&1
 
 echo "BOM profiles applied."
+
+# --- Agent role: attach inference-proxy provider to all sandboxes (if configured) ---
+if [[ "${ROLE}" == "agent" ]]; then
+  HAS_PROXY=$(guest_ssh "openshell provider get inference-proxy 2>/dev/null" 2>/dev/null || true)
+  if echo "${HAS_PROXY}" | grep -q 'inference-proxy'; then
+    echo "Attaching inference-proxy provider to sandboxes..."
+    guest_ssh "
+      export PATH=\"\$HOME/.local/bin:\$PATH\"
+      for SB in \$(openshell sandbox list --output json 2>/dev/null | python3 -c 'import sys,json;[print(s[\"name\"]) for s in json.load(sys.stdin)]' 2>/dev/null); do
+        openshell sandbox provider attach \${SB} inference-proxy 2>/dev/null || true
+        echo \"  Attached inference-proxy to \${SB}\"
+      done
+    " || true
+  fi
+fi

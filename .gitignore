@@ -3,6 +3,7 @@
 
 # Secret values (never commit)
 values-secret.yaml
+.env
 .vscode/
 .DS_Store
 jira/
@@ -15,3 +16,4 @@ local-docs/
 graphify-out/
 ssh-keys/
 charts/saw-bom/scripts/__pycache__/
+images/openclaw-proxy/gog
