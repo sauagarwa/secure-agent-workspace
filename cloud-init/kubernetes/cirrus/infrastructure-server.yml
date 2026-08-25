@@ -1,0 +1,73 @@
+apiVersion: cirrus.ibm.com/v1alpha1
+kind: Server
+metadata:
+  name: saw-infrastructure
+  namespace: ${NS}
+  labels:
+    app.kubernetes.io/name: secure-agent-workspace
+    app.kubernetes.io/component: saw-infrastructure
+spec:
+  cloudInit:
+    userData: |
+      #cloud-config
+      hostname: saw-infrastructure
+      users:
+        - default
+        - name: openshell
+          gecos: OpenShell infrastructure operator
+          lock_passwd: true
+          shell: /bin/bash
+      runcmd:
+        - |
+          set -eu
+          install -d -m 0750 /etc/openshell-saw
+          vars_device=""
+          for attempt in 1 2 3 4 5; do
+            vars_device="$(lsblk -rpno NAME,SERIAL | awk '$2=="VARS01"{print $1;exit}')"
+            if [ -n "${vars_device}" ]; then break; fi
+            sleep 10
+          done
+          test -n "${vars_device}"
+          mount "${vars_device}" /etc/openshell-saw
+          checkout=/opt/secure-agent-workspace
+          install -d -m 0755 "${checkout}"
+          curl -fsSL --retry 5 --retry-delay 10 \
+            https://github.com/rh-forge/secure-agent-workspace/archive/refs/heads/${BRANCH:-main}.tar.gz \
+            | tar -xz --strip-components=1 -C "${checkout}"
+          # Infrastructure VM: install provisioning tools, generate secrets,
+          # configure agent + integration VMs via SSH.
+          dnf install -y --setopt=install_weak_deps=False \
+            ansible-core openssh-clients jq curl openssl python3
+          # Generate SSH key for provisioning
+          install -d -m 0700 /home/openshell/.ssh
+          ssh-keygen -t ed25519 -f /home/openshell/.ssh/id_ed25519 -N "" -C "saw-infra"
+          chown -R openshell:openshell /home/openshell/.ssh
+          # Generate inter-VM bearer + front-door secrets
+          install -d -m 0700 /home/openshell/.config/saw-secrets
+          openssl rand -hex 32 > /home/openshell/.config/saw-secrets/inter-vm-bearer
+          openssl rand -hex 32 > /home/openshell/.config/saw-secrets/gmail-write-frontdoor
+          openssl rand -hex 32 > /home/openshell/.config/saw-secrets/m365-write-frontdoor
+          openssl rand -hex 32 > /home/openshell/.config/saw-secrets/slack-write-frontdoor
+          chmod 600 /home/openshell/.config/saw-secrets/*
+          chown -R openshell:openshell /home/openshell/.config
+          echo "Infrastructure VM provisioned. Run ansible from /opt/secure-agent-workspace/cloud-init-new/ansible/"
+  containerDiskImage: ${CONTAINER_DISK_IMAGE:-registry.cirrus.ibm.com/mici-golden-images/cirrus-rhel-9-golden-image:latest}
+  operatingSystem: ""
+  profile: c1.m4
+  running: true
+  ports:
+    - name: ssh
+      port: 22
+      protocol: TCP
+  mounts:
+    - name: vars-secret
+      serial: VARS01
+      volume:
+        secret:
+          secretName: saw-infrastructure-vars
+    - name: persistent-state
+      serial: SAWINFRAPERSIST
+      volume:
+        persistentVolumeClaim:
+          claimName: saw-infrastructure-persist
+          readOnly: false

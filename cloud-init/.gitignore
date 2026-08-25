@@ -1,0 +1,4 @@
+# Local secrets — never commit
+.secrets/
+ansible/files/__pycache__/
+kubernetes/rendered/

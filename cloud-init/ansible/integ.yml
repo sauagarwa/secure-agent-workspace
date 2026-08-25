@@ -1,0 +1,106 @@
+---
+# Integrations VM provisioning tasks.
+# Installs OpenShell, pre-pulls all proxy images, deploys inference proxy,
+# and configures the gateway with mTLS support.
+
+- name: Install system dependencies
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - jq
+      - curl
+      - openssl
+      - iproute
+      - nftables
+      - util-linux
+      - openssh-clients
+      - python3
+    state: present
+    install_weak_deps: false
+
+- name: Enable podman socket for cloud-user
+  ansible.builtin.systemd:
+    name: podman.socket
+    scope: user
+    state: started
+    enabled: true
+  become_user: cloud-user
+
+- name: Create persistent directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: cloud-user
+    group: cloud-user
+    mode: "0700"
+  loop:
+    - /home/cloud-user/.local/bin
+    - /home/cloud-user/.config/systemd/user
+    - /home/cloud-user/.config/secure-agent-workspace
+    - /home/cloud-user/.config/openshell
+
+- name: Install OpenShell binaries
+  ansible.builtin.shell: |
+    curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/v{{ openshell_version }}/openshell-linux-amd64.tar.gz" \
+      | tar -xz -C /usr/local/bin
+    openshell --version
+  args:
+    creates: /usr/local/bin/openshell
+
+- name: Pre-pull proxy container images
+  ansible.builtin.shell: |
+    podman pull {{ item }}
+  become_user: cloud-user
+  loop:
+    - "{{ gmail_read_image | default('quay.io/sauagarw/gmail-read-proxy:demo1-fix') }}"
+    - "{{ gmail_write_image | default('quay.io/redhat-et/gmail-write-proxy:demo1') }}"
+    - "{{ m365_read_image | default('quay.io/redhat-et/m365-read-proxy:demo1') }}"
+    - "{{ m365_write_image | default('quay.io/redhat-et/m365-write-proxy:demo1') }}"
+    - "{{ slack_read_image | default('quay.io/redhat-et/slack-read-proxy:demo1') }}"
+    - "{{ slack_write_image | default('quay.io/redhat-et/slack-write-proxy:demo1') }}"
+  ignore_errors: true
+
+- name: Install inference proxy script
+  ansible.builtin.copy:
+    src: files/inference-proxy.py
+    dest: /home/cloud-user/.local/bin/inference-proxy.py
+    owner: cloud-user
+    group: cloud-user
+    mode: "0755"
+
+- name: Install inference proxy systemd service
+  ansible.builtin.copy:
+    dest: /home/cloud-user/.config/systemd/user/inference-proxy.service
+    owner: cloud-user
+    group: cloud-user
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Inference Reverse Proxy
+      After=network-online.target
+      [Service]
+      Type=simple
+      Restart=always
+      RestartSec=3
+      Environment=PORT=18083
+      ExecStart=/usr/bin/python3 %h/.local/bin/inference-proxy.py
+      [Install]
+      WantedBy=default.target
+
+- name: Enable loginctl linger for cloud-user
+  ansible.builtin.shell: loginctl enable-linger cloud-user
+  changed_when: false
+
+- name: Record integ manifest
+  ansible.builtin.copy:
+    dest: /etc/saw-integ-manifest.env
+    content: |
+      OPENSHELL_VERSION={{ openshell_version }}
+      GMAIL_READ_IMAGE={{ gmail_read_image | default('quay.io/sauagarw/gmail-read-proxy:demo1-fix') }}
+      GMAIL_WRITE_IMAGE={{ gmail_write_image | default('quay.io/redhat-et/gmail-write-proxy:demo1') }}
+      M365_READ_IMAGE={{ m365_read_image | default('quay.io/redhat-et/m365-read-proxy:demo1') }}
+      M365_WRITE_IMAGE={{ m365_write_image | default('quay.io/redhat-et/m365-write-proxy:demo1') }}
+      SLACK_READ_IMAGE={{ slack_read_image | default('quay.io/redhat-et/slack-read-proxy:demo1') }}
+      SLACK_WRITE_IMAGE={{ slack_write_image | default('quay.io/redhat-et/slack-write-proxy:demo1') }}
+      ROLE=integrations
+      OWNER={{ owner }}

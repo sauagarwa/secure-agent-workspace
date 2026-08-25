@@ -1,0 +1,29 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: {{ (split ":" .Values.output.base.imageStreamTag)._0 }}
+  labels:
+    {{- include "build-installer.labels" . | nindent 4 }}
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: {{ (split ":" .Values.output.agent.imageStreamTag)._0 }}
+  labels:
+    {{- include "build-installer.labels" . | nindent 4 }}
+spec:
+  lookupPolicy:
+    local: true
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: {{ (split ":" .Values.output.integration.imageStreamTag)._0 }}
+  labels:
+    {{- include "build-installer.labels" . | nindent 4 }}
+spec:
+  lookupPolicy:
+    local: true

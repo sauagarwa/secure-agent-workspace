@@ -1,0 +1,100 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: saw-infrastructure
+  namespace: ${NS}
+  labels:
+    app.kubernetes.io/name: secure-agent-workspace
+    app.kubernetes.io/component: saw-infrastructure
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: saw-infrastructure
+    spec:
+      domain:
+        cpu:
+          cores: 2
+        resources:
+          requests:
+            memory: 4Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+              ports:
+                - name: ssh
+                  port: 22
+                  protocol: TCP
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: false
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: saw-infrastructure-root
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              hostname: saw-infrastructure
+              users:
+                - default
+                - name: openshell
+                  gecos: OpenShell infrastructure operator
+                  lock_passwd: true
+                  shell: /bin/bash
+                  ssh_authorized_keys:
+                    - ${SSH_PUBKEY}
+              packages:
+                - ansible-core
+                - openssh-clients
+                - jq
+                - curl
+                - openssl
+                - python3
+              runcmd:
+                - |
+                  set -eu
+                  checkout=/opt/secure-agent-workspace
+                  install -d -m 0755 "${checkout}"
+                  curl -fsSL --retry 5 --retry-delay 10 \
+                    https://github.com/rh-forge/secure-agent-workspace/archive/refs/heads/${BRANCH}.tar.gz \
+                    | tar -xz --strip-components=1 -C "${checkout}"
+                  # Generate SSH key for provisioning agent + integration VMs
+                  install -d -m 0700 /home/openshell/.ssh
+                  ssh-keygen -t ed25519 -f /home/openshell/.ssh/id_ed25519 -N "" -C "saw-infra"
+                  chown -R openshell:openshell /home/openshell/.ssh
+                  # Generate secrets
+                  install -d -m 0700 /home/openshell/.config/saw-secrets
+                  openssl rand -hex 32 > /home/openshell/.config/saw-secrets/inter-vm-bearer
+                  openssl rand -hex 32 > /home/openshell/.config/saw-secrets/gmail-write-frontdoor
+                  openssl rand -hex 32 > /home/openshell/.config/saw-secrets/m365-write-frontdoor
+                  openssl rand -hex 32 > /home/openshell/.config/saw-secrets/slack-write-frontdoor
+                  chmod 600 /home/openshell/.config/saw-secrets/*
+                  chown -R openshell:openshell /home/openshell/.config
+  dataVolumeTemplates:
+    - metadata:
+        name: saw-infrastructure-root
+      spec:
+        source:
+          http:
+            url: "${BASE_IMAGE_URL}"
+        storage:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi

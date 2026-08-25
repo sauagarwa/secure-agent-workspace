@@ -1,0 +1,106 @@
+apiVersion: cirrus.ibm.com/v1alpha1
+kind: Server
+metadata:
+  name: saw-agent
+  namespace: ${NS}
+  labels:
+    app.kubernetes.io/name: secure-agent-workspace
+    app.kubernetes.io/component: saw-agent
+spec:
+  cloudInit:
+    userData: |
+      #cloud-config
+      hostname: saw-agent
+      users:
+        - default
+        - name: openshell
+          gecos: OpenShell service account
+          lock_passwd: true
+          shell: /bin/bash
+      runcmd:
+        - |
+          set -euo pipefail
+          LOG=/var/log/saw-cloud-init.log
+          exec > >(tee -a "$LOG") 2>&1
+
+          log() { echo "[saw-init] $(date '+%H:%M:%S') $*"; }
+
+          log "=== SAW Agent cloud-init starting ==="
+          INSTALLER_IMAGE="${INSTALLER_IMAGE}"
+
+          # Step 1: Mount credentials secret disk
+          log "Step 1: Mounting SAWCREDS disk..."
+          mkdir -p /etc/saw/secrets
+          TRIES=0
+          while [ ! -b /dev/disk/by-id/virtio-SAWCREDS ] && [ $TRIES -lt 30 ]; do
+            TRIES=$((TRIES + 1))
+            log "  waiting for virtio-SAWCREDS... ($TRIES/30)"
+            sleep 2
+          done
+          if [ -b /dev/disk/by-id/virtio-SAWCREDS ]; then
+            mount -o ro /dev/disk/by-id/virtio-SAWCREDS /etc/saw/secrets
+            log "  mounted ($(ls /etc/saw/secrets/ | tr '\n' ' '))"
+          else
+            log "  WARNING: SAWCREDS device not found — proceeding without credentials"
+          fi
+
+          # Step 2: Build credentials.env from mounted secret files
+          log "Step 2: Building /etc/saw/credentials.env..."
+          : > /etc/saw/credentials.env
+          for f in /etc/saw/secrets/*; do
+            [ -f "$f" ] || continue
+            key=$(basename "$f" | tr '[:lower:]-' '[:upper:]_')
+            echo "${key}=$(cat "$f")" >> /etc/saw/credentials.env
+            log "  loaded: ${key}"
+          done
+          chmod 600 /etc/saw/credentials.env
+
+          # Step 3: Pull and extract installer image
+          log "Step 3: Pulling installer image: ${INSTALLER_IMAGE}"
+          podman pull "${INSTALLER_IMAGE}"
+          CID=$(podman create "${INSTALLER_IMAGE}")
+          podman cp "${CID}:/opt/saw-installer" /opt/
+          podman rm "${CID}"
+          chmod +x /opt/saw-installer/*.sh /opt/saw-installer/lib/*.sh
+          log "  extracted $(find /opt/saw-installer -type f | wc -l) files"
+
+          # Step 4: Install and start BOM installer service
+          log "Step 4: Starting saw-bom-install.service..."
+          cp /opt/saw-installer/saw-bom-install.service /etc/systemd/system/
+          systemctl daemon-reload
+          systemctl enable --now saw-bom-install.service
+
+          log "=== SAW Agent cloud-init complete ==="
+          log "Monitor installer: journalctl -u saw-bom-install.service -f"
+  containerDiskImage: ${CONTAINER_DISK_IMAGE:-registry.cirrus.ibm.com/mici-golden-images/cirrus-rhel-9-golden-image:latest}
+  operatingSystem: ""
+  profile: c4.m24
+  running: true
+  ports:
+    - name: userport
+      port: 18789
+      protocol: TCP
+    - name: forgeui
+      port: 18090
+      protocol: TCP
+    - name: provisionlog
+      port: 18080
+      protocol: TCP
+  mounts:
+    - name: agent-credentials
+      serial: SAWCREDS
+      volume:
+        secret:
+          secretName: saw-agent-credentials
+    - name: persistent-state
+      serial: SAWAGENTSTATE
+      volume:
+        persistentVolumeClaim:
+          claimName: saw-agent-state-persist
+          readOnly: false
+    - name: persistent-assets
+      serial: SAWAGENTASSETS
+      volume:
+        persistentVolumeClaim:
+          claimName: saw-agent-assets-persist
+          readOnly: false

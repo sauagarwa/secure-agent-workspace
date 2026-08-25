@@ -1,0 +1,17 @@
+ARG BASE_IMAGE=saw-installer-base:latest
+FROM ${BASE_IMAGE}
+
+# Manifest (pinned artifact versions)
+COPY cloud-init/installer/manifest.yaml /opt/saw-installer/
+
+# BOM profiles (workspace/provider/sandbox definitions)
+COPY charts/saw-bom/profiles/ /opt/saw-installer/profiles/
+
+# BOM apply script
+COPY charts/saw-bom/scripts/apply_bom.py /opt/saw-installer/lib/apply_bom.py
+
+# Governance profiles
+COPY charts/governance-policy/profiles/ /opt/saw-installer/governance-profiles/
+
+LABEL io.saw.component="installer-agent" \
+      io.saw.description="SAW BOM Installer — agent role with BOM profiles and apply_bom.py"

@@ -1,0 +1,20 @@
+[Unit]
+Description=SAW BOM Installer
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/saw-installer/manifest.yaml
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/saw-installer
+ExecStart=/opt/saw-installer/install-bom.sh --manifest /opt/saw-installer/manifest.yaml --state-dir /var/lib/saw-bom
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=yes
+TimeoutStartSec=1800
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

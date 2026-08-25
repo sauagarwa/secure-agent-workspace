@@ -1,0 +1,13 @@
+apiVersion: v2
+name: build-installer
+description: Builds SAW BOM installer images (base + role-specific) via OpenShift BuildConfig
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - saw
+  - bom
+  - installer
+  - openshift
+  - buildconfig
+  - imagestream

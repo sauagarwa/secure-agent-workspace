@@ -53,6 +53,12 @@ sandboxImage: ""
 # NemoClaw CLI container image. Used to install the nemoclaw CLI on the gateway VM.
 nemoclawCliImage: ""
 
+# Installer images for agent/integrations roles (two-VM split).
+# Must be publicly accessible from inside the VM (the VM uses podman to pull).
+installer:
+  agentImage: ""
+  integrationImage: ""
+
 # Agent to run inside the sandbox: openclaw, hermes, or langchain-deepagents-code
 agent: openclaw
 

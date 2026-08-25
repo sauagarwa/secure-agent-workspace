@@ -1,0 +1,15 @@
+FROM registry.fedoraproject.org/fedora-minimal:44
+
+RUN microdnf install -y python3 python3-pip python3-pyyaml && microdnf clean all
+
+COPY install-bom.sh /opt/saw-installer/
+COPY boot.sh /opt/saw-installer/
+COPY saw-bom-install.service /opt/saw-installer/
+COPY lib/ /opt/saw-installer/lib/
+
+RUN chmod +x /opt/saw-installer/install-bom.sh /opt/saw-installer/boot.sh /opt/saw-installer/lib/*.sh
+
+WORKDIR /opt/saw-installer
+
+LABEL io.saw.component="installer-base" \
+      io.saw.description="SAW BOM Installer — base image with common install phases"

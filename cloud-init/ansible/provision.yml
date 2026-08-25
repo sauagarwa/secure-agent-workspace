@@ -1,0 +1,279 @@
+---
+# Provision the three-VM SAW environment.
+# Creates secrets, applies platform CRDs, waits for VMs to be running.
+#
+# Usage:
+#   ansible-playbook ansible/provision.yml -e platform=cirrus -e ns=my-namespace
+#   ansible-playbook ansible/provision.yml -e platform=openshift-cnv -e ns=my-namespace -e ssh_pubkey="ssh-ed25519 ..."
+#   ansible-playbook ansible/provision.yml -e platform=cirrus -e ns=my-namespace -e action=delete
+
+- name: Provision SAW VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    platform: "openshift-cnv"
+    ns: "{{ lookup('env', 'NS') | default('openshell-agents', true) }}"
+    branch: "{{ lookup('env', 'BRANCH') | default('main', true) }}"
+    ssh_pubkey_path: "{{ lookup('env', 'SSH_PUBKEY_PATH') | default('~/.ssh/id_ed25519.pub', true) }}"
+    ssh_pubkey: "{{ lookup('env', 'SSH_PUBKEY') | default(lookup('file', ssh_pubkey_path, errors='ignore') | default('', true), true) }}"
+    container_disk_image: "{{ lookup('env', 'CONTAINER_DISK_IMAGE') | default('registry.cirrus.ibm.com/mici-golden-images/cirrus-rhel-9-golden-image:latest', true) }}"
+    golden_image_pvc: "{{ lookup('env', 'GOLDEN_IMAGE_PVC') | default('openshell-gateway-podman-golden', true) }}"
+    base_image_url: "{{ lookup('env', 'BASE_IMAGE_URL') | default('https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2', true) }}"
+    installer_image: "{{ lookup('env', 'INSTALLER_IMAGE') | default('quay.io/sauagarw/saw-installer-agent:latest', true) }}"
+    inference_provider: "{{ lookup('env', 'INFERENCE_PROVIDER') | default('', true) }}"
+    inference_model: "{{ lookup('env', 'INFERENCE_MODEL') | default('', true) }}"
+    inference_api_key: "{{ lookup('env', 'INFERENCE_API_KEY') | default('', true) }}"
+    inference_endpoint_url: "{{ lookup('env', 'INFERENCE_ENDPOINT_URL') | default('', true) }}"
+    secrets_dir: "{{ playbook_dir }}/../.secrets"
+    kube_dir: "{{ playbook_dir }}/../kubernetes/{{ platform }}"
+    action: "create"
+    cache: false
+    golden_dv_name: "saw-base-golden"
+    vms:
+      - role: infrastructure
+      - role: integration
+      - role: agent
+
+  tasks:
+
+    # ==========================================
+    # Validate
+    # ==========================================
+    - name: Validate platform
+      ansible.builtin.assert:
+        that: platform in ['cirrus', 'openshift-cnv']
+        fail_msg: "platform must be cirrus or openshift-cnv, got '{{ platform }}'"
+      tags: always
+
+    - name: Check oc login
+      ansible.builtin.command: oc whoami
+      changed_when: false
+      tags: always
+
+    - name: Ensure namespace exists
+      ansible.builtin.command: oc create namespace {{ ns }} --dry-run=client -o yaml
+      register: ns_yaml
+      changed_when: false
+      tags: always
+
+    - name: Apply namespace
+      ansible.builtin.shell: echo '{{ ns_yaml.stdout }}' | oc apply -f -
+      changed_when: true
+      tags: always
+
+    # ==========================================
+    # Delete flow
+    # ==========================================
+    - name: Delete VMs
+      when: action == 'delete'
+      block:
+        - name: Delete each VM
+          ansible.builtin.command: >
+            kubectl delete {{ 'server' if platform == 'cirrus' else 'vm' }}
+            saw-{{ item.role }} -n {{ ns }} --ignore-not-found
+          loop: "{{ vms }}"
+          changed_when: true
+
+        - name: Delete K8s Secrets
+          ansible.builtin.command: >
+            kubectl delete secret {{ item }} -n {{ ns }} --ignore-not-found
+          loop:
+            - inter-vm-bearer
+            - gmail-write-frontdoor
+            - m365-write-frontdoor
+            - slack-write-frontdoor
+            - saw-agent-credentials
+            - saw-integration-credentials
+          changed_when: true
+
+        - name: Done
+          ansible.builtin.debug:
+            msg: "All VMs and secrets deleted from {{ ns }}"
+
+        - name: End play after delete
+          ansible.builtin.meta: end_play
+
+    # ==========================================
+    # Generate secrets
+    # ==========================================
+    - name: Create secrets directory
+      ansible.builtin.file:
+        path: "{{ secrets_dir }}"
+        state: directory
+        mode: "0700"
+      tags: secrets
+
+    - name: Generate bearer secrets
+      ansible.builtin.shell: |
+        if [ ! -f "{{ secrets_dir }}/{{ item }}" ]; then
+          openssl rand -hex 32 > "{{ secrets_dir }}/{{ item }}"
+          chmod 600 "{{ secrets_dir }}/{{ item }}"
+          echo "generated"
+        else
+          echo "exists"
+        fi
+      register: secret_results
+      changed_when: "'generated' in secret_results.stdout"
+      loop:
+        - inter-vm-bearer
+        - gmail-write-frontdoor
+        - m365-write-frontdoor
+        - slack-write-frontdoor
+      tags: secrets
+
+    - name: Show secret status
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ item.stdout }}"
+      loop: "{{ secret_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      tags: secrets
+
+    # ==========================================
+    # Push secrets to K8s
+    # ==========================================
+    - name: Compute inter-VM bearer SHA256
+      ansible.builtin.shell: |
+        echo -n "$(cat {{ secrets_dir }}/inter-vm-bearer)" | sha256sum | cut -d ' ' -f 1
+      register: bearer_sha
+      changed_when: false
+      tags: secrets
+
+    - name: Create inter-vm-bearer K8s Secret
+      ansible.builtin.shell: |
+        oc create secret generic inter-vm-bearer -n {{ ns }} \
+          --from-literal=bearer="$(cat {{ secrets_dir }}/inter-vm-bearer)" \
+          --from-literal=sha256="{{ bearer_sha.stdout | trim }}" \
+          --dry-run=client -o yaml | oc apply -f -
+      changed_when: true
+      tags: secrets
+
+    - name: Create front-door K8s Secrets
+      ansible.builtin.shell: |
+        oc create secret generic {{ item }} -n {{ ns }} \
+          --from-file=bearer={{ secrets_dir }}/{{ item }} \
+          --dry-run=client -o yaml | oc apply -f -
+      loop:
+        - gmail-write-frontdoor
+        - m365-write-frontdoor
+        - slack-write-frontdoor
+      changed_when: true
+      tags: secrets
+
+    # ==========================================
+    # Per-role credential secrets (mounted as disks on VMs)
+    # ==========================================
+    - name: Write inference credentials to .secrets/
+      ansible.builtin.copy:
+        dest: "{{ secrets_dir }}/{{ item.name }}"
+        content: "{{ item.value }}"
+        mode: "0600"
+      loop:
+        - { name: "inference-provider",    value: "{{ inference_provider }}" }
+        - { name: "inference-model",       value: "{{ inference_model }}" }
+        - { name: "inference-api-key",     value: "{{ inference_api_key }}" }
+        - { name: "inference-endpoint-url", value: "{{ inference_endpoint_url }}" }
+      when: item.value | length > 0
+      no_log: true
+      tags: secrets
+
+    - name: Create saw-agent-credentials secret
+      ansible.builtin.shell: |
+        args="--from-file=inter-vm-bearer={{ secrets_dir }}/inter-vm-bearer"
+        for cred in inference-provider inference-model inference-api-key inference-endpoint-url; do
+          f="{{ secrets_dir }}/${cred}"
+          [ -f "$f" ] && args="$args --from-file=${cred}=$f"
+        done
+        oc create secret generic saw-agent-credentials -n {{ ns }} $args \
+          --dry-run=client -o yaml | oc apply -f -
+      changed_when: true
+      tags: secrets
+
+    - name: Create saw-integration-credentials secret
+      ansible.builtin.shell: |
+        oc create secret generic saw-integration-credentials -n {{ ns }} \
+          --from-literal=inter-vm-bearer-sha256="{{ bearer_sha.stdout | trim }}" \
+          --from-file=gmail-write-frontdoor={{ secrets_dir }}/gmail-write-frontdoor \
+          --from-file=m365-write-frontdoor={{ secrets_dir }}/m365-write-frontdoor \
+          --from-file=slack-write-frontdoor={{ secrets_dir }}/slack-write-frontdoor \
+          --dry-run=client -o yaml | oc apply -f -
+      changed_when: true
+      tags: secrets
+
+    # ==========================================
+    # Cache base image (optional)
+    # ==========================================
+    - name: Import golden base image (cache=true)
+      when: cache | bool and platform == 'openshift-cnv'
+      ansible.builtin.script: "{{ playbook_dir }}/../scripts/import-base-image.sh"
+      environment:
+        NS: "{{ ns }}"
+        BASE_IMAGE_URL: "{{ base_image_url }}"
+        GOLDEN_DV_NAME: "{{ golden_dv_name }}"
+
+    - name: Set DataVolume source type
+      ansible.builtin.set_fact:
+        dv_source: "{{ 'pvc' if (cache | bool) else 'http' }}"
+
+    # ==========================================
+    # Create VMs
+    # ==========================================
+    - name: Resolve CRD file for each VM
+      ansible.builtin.set_fact:
+        vm_files: >-
+          {{
+            vms | map(attribute='role') | map('regex_replace', '^(.*)$',
+              kube_dir ~ '/' ~ '\1' ~ ('-server.yml' if platform == 'cirrus' else '-vm.yml')
+            ) | list
+          }}
+
+    - name: Apply VM CRDs (http source)
+      when: not (cache | bool) or platform == 'cirrus'
+      ansible.builtin.shell: |
+        sed -e "s|\${NS}|{{ ns }}|g" \
+            -e "s|\${BRANCH}|{{ branch }}|g" \
+            -e "s|\${CONTAINER_DISK_IMAGE}|{{ container_disk_image }}|g" \
+            -e "s|\${SSH_PUBKEY}|{{ ssh_pubkey }}|g" \
+            -e "s|\${BASE_IMAGE_URL}|{{ base_image_url }}|g" \
+            -e "s|\${INSTALLER_IMAGE}|{{ installer_image }}|g" \
+          "{{ item }}" | oc apply -n "{{ ns }}" -f -
+      loop: "{{ vm_files }}"
+      changed_when: true
+
+    - name: Apply VM CRDs (pvc clone from cached golden image)
+      when: (cache | bool) and platform == 'openshift-cnv'
+      ansible.builtin.shell: |
+        sed -e "s|\${NS}|{{ ns }}|g" \
+            -e "s|\${BRANCH}|{{ branch }}|g" \
+            -e "s|\${SSH_PUBKEY}|{{ ssh_pubkey }}|g" \
+            -e "s|\${INSTALLER_IMAGE}|{{ installer_image }}|g" \
+          "{{ item }}" \
+          | sed 's|source:.*|source:|; /source:/a\          pvc:\n            name: {{ golden_dv_name }}\n            namespace: {{ ns }}' \
+          | sed '/http:/,/url:/d' \
+          | oc apply -n "{{ ns }}" -f -
+      loop: "{{ vm_files }}"
+      changed_when: true
+
+    # ==========================================
+    # Wait for VMs
+    # ==========================================
+    - name: Wait for VMs to be running (up to 5 min)
+      ansible.builtin.shell: |
+        kubectl get vmi saw-{{ item.role }} -n {{ ns }} -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound"
+      register: vm_status
+      until: vm_status.stdout == "Running"
+      retries: 30
+      delay: 10
+      loop: "{{ vms }}"
+      loop_control:
+        label: "saw-{{ item.role }}"
+
+    - name: Show results
+      ansible.builtin.debug:
+        msg: |
+          ✓ All VMs created in {{ ns }} ({{ platform }})
+            saw-infrastructure  — provisioner
+            saw-integration     — proxy services
+            saw-agent           — OpenClaw agent

@@ -1,0 +1,26 @@
+git:
+  uri: https://github.com/rh-forge/secure-agent-workspace.git
+  ref: main
+
+build:
+  base:
+    contextDir: cloud-init/installer
+    dockerfilePath: Dockerfile.base
+  agent:
+    contextDir: ""
+    dockerfilePath: cloud-init/installer/Dockerfile.agent
+  integration:
+    contextDir: ""
+    dockerfilePath: cloud-init/installer/Dockerfile.integration
+
+output:
+  base:
+    imageStreamTag: "saw-installer-base:latest"
+  agent:
+    imageStreamTag: "saw-installer-agent:latest"
+  integration:
+    imageStreamTag: "saw-installer-integration:latest"
+
+resources:
+  limits:
+    memory: 1Gi

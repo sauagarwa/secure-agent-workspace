@@ -1,0 +1,21 @@
+ARG BASE_IMAGE=saw-installer-base:latest
+FROM ${BASE_IMAGE}
+
+# Integration manifest (pinned artifact versions)
+COPY cloud-init/installer/manifest-integration.yaml /opt/saw-installer/manifest.yaml
+
+# BOM profiles (proxy sandbox definitions)
+COPY charts/saw-bom/profiles/ /opt/saw-installer/profiles/
+
+# BOM apply script
+COPY charts/saw-bom/scripts/apply_bom.py /opt/saw-installer/lib/apply_bom.py
+
+# Governance profiles
+COPY charts/governance-policy/profiles/ /opt/saw-installer/governance-profiles/
+
+# Integration-specific bootstrap
+COPY cloud-init/installer/lib/bootstrap_integration.sh /opt/saw-installer/lib/bootstrap_integration.sh
+RUN chmod +x /opt/saw-installer/lib/bootstrap_integration.sh
+
+LABEL io.saw.component="installer-integration" \
+      io.saw.description="SAW BOM Installer — integration role with proxy profiles and inference proxy"

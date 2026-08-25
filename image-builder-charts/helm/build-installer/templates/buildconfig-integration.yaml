@@ -1,0 +1,31 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: {{ (split ":" .Values.output.integration.imageStreamTag)._0 }}
+  labels:
+    {{- include "build-installer.labels" . | nindent 4 }}
+spec:
+  source:
+    type: Git
+    git:
+      uri: {{ .Values.git.uri }}
+      ref: {{ .Values.git.ref }}
+    {{- if .Values.build.integration.contextDir }}
+    contextDir: {{ .Values.build.integration.contextDir }}
+    {{- end }}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: {{ .Values.build.integration.dockerfilePath }}
+      forcePull: true
+      buildArgs:
+        - name: BASE_IMAGE
+          value: {{ printf "%s/%s" .Release.Namespace .Values.output.base.imageStreamTag | quote }}
+  output:
+    to:
+      kind: ImageStreamTag
+      name: {{ .Values.output.integration.imageStreamTag }}
+  resources:
+    limits:
+      memory: {{ .Values.resources.limits.memory }}
+  triggers: []

@@ -24,6 +24,7 @@ data:
           - "__SSH_PUBLIC_KEY__"
           {{- end }}
 
+    {{- if ne .Values.role "agent" }}
     write_files:
       - path: /etc/openshell/gateway.env
         owner: root:root
@@ -90,10 +91,31 @@ data:
           phases = ["validate"]
           {{- end }}
       {{- end }}
+    {{- end }}
 
     runcmd:
       - |
         set -euo pipefail
+        {{- if eq .Values.role "agent" }}
+        INSTALLER_IMAGE="{{ .Values.installer.agentImage }}"
+        echo "=== SAW Agent Installer ==="
+        echo "Installer image: ${INSTALLER_IMAGE}"
+
+        # Pull and extract installer image
+        podman pull "${INSTALLER_IMAGE}"
+        CID=$(podman create "${INSTALLER_IMAGE}")
+        podman cp "${CID}:/opt/saw-installer" /opt/
+        podman rm "${CID}"
+        chmod +x /opt/saw-installer/*.sh /opt/saw-installer/lib/*.sh
+
+        # Install and start BOM installer service
+        cp /opt/saw-installer/saw-bom-install.service /etc/systemd/system/
+        systemctl daemon-reload
+        systemctl enable --now saw-bom-install.service
+
+        echo "=== Agent installer service started ==="
+        echo "Monitor: journalctl -u saw-bom-install.service -f"
+        {{- else }}
         echo "=== Configuring OpenShell gateway ==="
         USER_NAME="cloud-user"
         USER_HOME="$(getent passwd "${USER_NAME}" | cut -d: -f6)"
@@ -107,5 +129,6 @@ data:
         fi
         chown -R "${USER_NAME}:${USER_NAME}" "${USER_HOME}/.config/openshell"
         systemctl start openshell-gateway-setup.service
+        {{- end }}
 
     final_message: "openshell-saw cloud-init finished"

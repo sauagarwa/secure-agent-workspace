@@ -1,0 +1,35 @@
+---
+# Integrations VM variables — copy to cloud-init/.secrets/integ-vars.yml and fill in.
+# Never commit the filled-in version.
+
+saw_role: integrations
+saw_owner: alice
+
+openshell_version: "0.0.110"
+
+# Proxy images
+gmail_read_image: "quay.io/sauagarw/gmail-read-proxy:demo1-fix"
+gmail_write_image: "quay.io/redhat-et/gmail-write-proxy:demo1"
+m365_read_image: "quay.io/redhat-et/m365-read-proxy:demo1"
+m365_write_image: "quay.io/redhat-et/m365-write-proxy:demo1"
+slack_read_image: "quay.io/redhat-et/slack-read-proxy:demo1"
+slack_write_image: "quay.io/redhat-et/slack-write-proxy:demo1"
+
+# Inter-VM bearer (same value as agent VM, 64 hex chars)
+integration_proxy_expected_bearer: ""
+
+# Inference provider API key (real key — only on integ VM)
+integration_proxy_openai_key: ""
+inference_host: "integrate.api.nvidia.com"
+
+# Gmail OAuth (configured post-deploy via configure-gmail-refresh)
+# gmail_oauth_client_json: ""
+# gmail_oauth_refresh_token: ""
+
+# Slack tokens (if enabling Slack proxies)
+# slack_read_user_token: ""    # xoxp-... read-scoped
+# slack_write_user_token: ""   # xoxp-... chat:write scoped
+# slack_allowed_channel_ids: ""
+
+# M365 (if enabling M365 proxies)
+# m365_tenant_id: "organizations"
