@@ -1,0 +1,109 @@
+SAW_PYTHON ?= python3
+SAW_VALUES ?= overrides/saw-blueprint.yaml
+SAW_PLATFORM_VALUES ?= config/saw-platform.yaml
+SAW_PLATFORM_NAMESPACE ?= saw-system
+SAW_PLATFORM_CONFIGMAP ?= saw-platform-config
+SAW_REQUIRE_KEYCLOAK ?= 0
+SAW_USER_VALUES ?=
+SAW_VENV ?= .venv-saw
+SAW_TEST_PYTHON := $(SAW_VENV)/bin/python
+SAW_DEPS_STAMP := $(SAW_VENV)/.saw-deps-stamp
+SAW_IMAGE_BUILD_NAMESPACE ?= saw-installer-validation
+SAW_SMOKE_NAME ?= saw-smoke
+SAW_TENANT_MANAGEMENT ?= helm
+
+.PHONY: saw-image-context saw-python saw-platform-check saw-platform-operators saw-keycloak-operator saw-argo-discover setup-vault configure-vault saw-vault-plan saw-image-build saw-image-smoke-render saw-tenant-values saw-tenant-install saw-user-values saw-user-install saw-platform-discover saw-platform-configmap
+
+# The SAW test environment is defined by cli/pyproject.toml. Dependencies are
+# installed on the first run (and whenever that file changes), then tests run
+# offline from the existing virtual environment.
+saw-python: $(SAW_DEPS_STAMP) ## Create/update the SAW test venv from cli/pyproject.toml
+
+$(SAW_DEPS_STAMP): cli/pyproject.toml
+	@test -x "$(SAW_TEST_PYTHON)" || $(SAW_PYTHON) -m venv "$(SAW_VENV)"
+	@$(SAW_TEST_PYTHON) -m pip install --disable-pip-version-check --quiet -e "./cli[dev]"
+	@touch "$(SAW_DEPS_STAMP)"
+saw-image-context: ## Prepare a clean image build context; does not build, push or deploy
+	@test -n "$(SAW_IMAGE_CONTEXT)" || (echo "Set SAW_IMAGE_CONTEXT to a new directory"; exit 1)
+	@test -n "$(SAW_INSTALLER_BOM)" || (echo "Set SAW_INSTALLER_BOM to the selected installer release YAML"; exit 1)
+	@$(SAW_PYTHON) tools/saw/build_image_context.py --installer-bom "$(SAW_INSTALLER_BOM)" --output "$(SAW_IMAGE_CONTEXT)"
+
+saw-platform-check: ## Read-only check for the OpenShift APIs/operators required by SAW
+	@SAW_REQUIRE_KEYCLOAK="$(SAW_REQUIRE_KEYCLOAK)" bash tools/saw/platform_preflight.sh
+
+saw-platform-operators: ## Install standalone SAW OperatorHub subscriptions; cluster-admin required
+	@oc apply -f examples/saw/manual-operators.yaml
+
+setup-vault: ## Install/validate SAW ESO and Vault integration prerequisites
+	@bash scripts/setup-saw-vault.sh
+
+configure-vault: saw-python ## Render a reviewed Vault policy/role plan for one user
+	@test -n "$(SAW_USER_VALUES)" || (echo "Set SAW_USER_VALUES to one sawUser YAML file"; exit 1)
+	@test -f "$(SAW_PLATFORM_VALUES)" || (echo "Missing $(SAW_PLATFORM_VALUES); run: make saw-platform-discover"; exit 1)
+	@$(SAW_TEST_PYTHON) tools/saw/render_user_vault_plan.py --platform-values "$(SAW_PLATFORM_VALUES)" --user-values "$(SAW_USER_VALUES)"
+
+saw-keycloak-operator: ## Install the optional bundled Keycloak operator; cluster-admin required
+	@oc apply -f examples/saw/manual-keycloak-operator.yaml
+
+saw-platform-discover: saw-python ## Create config/saw-platform.yaml from the example and current cluster
+	@$(SAW_TEST_PYTHON) tools/saw/discover_platform.py --example config/saw-platform.yaml.example --output "$(SAW_PLATFORM_VALUES)"
+
+saw-platform-configmap: ## Publish the reviewed platform config for manual user installs
+	@SAW_PLATFORM_VALUES="$(SAW_PLATFORM_VALUES)" SAW_PLATFORM_NAMESPACE="$(SAW_PLATFORM_NAMESPACE)" SAW_PLATFORM_CONFIGMAP="$(SAW_PLATFORM_CONFIGMAP)" bash tools/saw/publish_platform_config.sh
+
+saw-argo-discover: ## Print the Argo controller ServiceAccount values (or candidate deployments)
+	@bash tools/saw/argo_identity.sh
+
+saw-vault-plan: saw-python ## Render a reviewed Vault policy/role plan; set SAW_TENANT and optional SAW_VALUES
+	@test -n "$(SAW_TENANT)" || (echo "Set SAW_TENANT to a tenant.name from $(SAW_VALUES)"; exit 1)
+	@$(SAW_TEST_PYTHON) tools/saw/render_vault_plan.py --values "$(SAW_VALUES)" --tenant "$(SAW_TENANT)"
+
+saw-tenant-values: saw-python ## Resolve one tenant into direct openshell-saw values; set SAW_TENANT
+	@test -n "$(SAW_TENANT)" || (echo "Set SAW_TENANT to a tenant.name from $(SAW_VALUES)"; exit 1)
+	@$(SAW_TEST_PYTHON) tools/saw/render_tenant_values.py --values "$(SAW_VALUES)" --tenant "$(SAW_TENANT)"
+
+saw-tenant-install: ## Direct Helm deployment only; set SAW_TENANT and keep SAW_TENANT_MANAGEMENT=helm
+	@SAW_TENANT="$(SAW_TENANT)" SAW_VALUES="$(SAW_VALUES)" SAW_TENANT_MANAGEMENT="$(SAW_TENANT_MANAGEMENT)" bash tools/saw/install_tenant.sh
+
+saw-user-values: saw-python ## Render one sawUser with shared platform defaults; set SAW_USER_VALUES
+	@test -n "$(SAW_USER_VALUES)" || (echo "Set SAW_USER_VALUES to a sawUser YAML file"; exit 1)
+	@test -f "$(SAW_PLATFORM_VALUES)" || (echo "Missing $(SAW_PLATFORM_VALUES); run: make saw-platform-discover"; exit 1)
+	@$(SAW_TEST_PYTHON) tools/saw/render_user_values.py --platform-values "$(SAW_PLATFORM_VALUES)" --user-values "$(SAW_USER_VALUES)"
+
+saw-user-install: ## Create/update one user SAW; set SAW_USER_VALUES (uses SAW_PLATFORM_VALUES)
+	@test -n "$(SAW_USER_VALUES)" || (echo "Set SAW_USER_VALUES to a sawUser YAML file"; exit 1)
+	@SAW_PLATFORM_VALUES="$(SAW_PLATFORM_VALUES)" SAW_PLATFORM_NAMESPACE="$(SAW_PLATFORM_NAMESPACE)" SAW_PLATFORM_CONFIGMAP="$(SAW_PLATFORM_CONFIGMAP)" SAW_USER_VALUES="$(SAW_USER_VALUES)" SAW_TENANT_MANAGEMENT="$(SAW_TENANT_MANAGEMENT)" bash tools/saw/install_user.sh
+
+saw-image-build: ## Start an isolated OpenShift image build; set SAW_IMAGE_CONTEXT
+	@SAW_IMAGE_CONTEXT="$(SAW_IMAGE_CONTEXT)" SAW_IMAGE_BUILD_NAMESPACE="$(SAW_IMAGE_BUILD_NAMESPACE)" bash tools/saw/start_image_build.sh
+
+saw-image-smoke-render: ## Render a smoke VM manifest; set SAW_INSTALLER_BOM, SAW_SMOKE_IMAGE and SAW_SMOKE_OUTPUT
+	@test -n "$(SAW_INSTALLER_BOM)" || (echo "Set SAW_INSTALLER_BOM"; exit 1)
+	@test -n "$(SAW_SMOKE_IMAGE)" || (echo "Set SAW_SMOKE_IMAGE to registry/repository@sha256:<digest>"; exit 1)
+	@test -n "$(SAW_SMOKE_OUTPUT)" || (echo "Set SAW_SMOKE_OUTPUT to a new manifest path"; exit 1)
+	@$(SAW_PYTHON) tools/saw/render_boot_smoke.py --installer-bom "$(SAW_INSTALLER_BOM)" --name "$(SAW_SMOKE_NAME)" --image "$(SAW_SMOKE_IMAGE)" --output "$(SAW_SMOKE_OUTPUT)"
+
+.PHONY: saw-test-fast saw-schema-check saw-render-gitops saw-test-tenant-integration
+
+.PHONY: saw-guest-bundle
+saw-guest-bundle: ## Build a guest source bundle (set SAW_GUEST_BUNDLE to a new output path)
+	@test -n "$(SAW_GUEST_BUNDLE)" || (echo "Set SAW_GUEST_BUNDLE to a new output .tar.gz path"; exit 1)
+	@test -n "$(SAW_INSTALLER_BOM)" || (echo "Set SAW_INSTALLER_BOM to the selected installer release YAML"; exit 1)
+	@$(SAW_PYTHON) tools/saw/build_guest_bundle.py --installer-bom "$(SAW_INSTALLER_BOM)" --output "$(SAW_GUEST_BUNDLE)"
+
+saw-schema-check: ## Check shared schemas match the generated Helm validation bundle
+	@$(SAW_PYTHON) tools/saw/render_chart_schema.py --check
+	@$(SAW_PYTHON) tools/saw/sync_installer_chart.py --check
+
+saw-test-fast: saw-schema-check saw-python ## Run offline blueprint/profile/security contracts (no cluster access)
+	@PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=cli/src:guest $(SAW_TEST_PYTHON) -m pytest -q -p no:cacheprovider \
+		tests/saw installer/tests cli/tests/test_helm.py cli/tests/test_kube.py
+	@helm lint charts/saw-blueprint
+	@helm lint charts/saw-bom
+
+saw-render-gitops: saw-schema-check ## Preview the same chart/values Argo CD consumes; does not apply
+	@helm template saw-blueprint charts/saw-blueprint --namespace saw-system \
+		-f values-global.yaml -f values-prod.yaml -f "$(SAW_VALUES)"
+
+saw-test-tenant-integration: ## Opt-in live cluster isolation/ESO/Argo checks; needs SAW_TEST_* and Vault variables
+	@tests/saw/test-tenant-gitops-integration.sh
