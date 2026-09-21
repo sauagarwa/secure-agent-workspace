@@ -293,6 +293,16 @@ Follow these steps in order for a new environment.
    binary build. It prints the candidate immutable `repository@sha256:digest`.
    Do not use that image for tenants yet.
 
+   The same build can be started from GitHub Actions with the manually triggered
+   [`Build SAW golden VM image`](.github/workflows/build-saw-golden-image.yml)
+   workflow. Configure the `saw-golden-image` GitHub environment with
+   `OPENSHIFT_SERVER`, `OPENSHIFT_TOKEN`, and `OPENSHIFT_CA_BUNDLE` secrets,
+   then provide the release name and BOM path when dispatching the workflow.
+   The workflow uploads the candidate image reference and build inputs as an
+   artifact; it deliberately stops before promotion and CDI `DataSource`
+   creation so the image can complete the smoke, scan, signature, and approval
+   gates first.
+
 4. Render and run the disposable boot smoke test.
 
    ```bash
