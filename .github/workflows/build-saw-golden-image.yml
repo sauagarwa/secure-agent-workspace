@@ -79,14 +79,19 @@ jobs:
           set -euo pipefail
           owner="$(printf '%s' "$GH_OWNER" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/saw-golden-image:${RELEASE}"
-          printf '%s' "$GH_TOKEN" | podman login ghcr.io \
+          printf '%s' "$GH_TOKEN" | sudo podman login ghcr.io \
             --username "$GITHUB_ACTOR" --password-stdin
-          podman build --privileged \
+          sudo podman build \
+            --isolation=chroot \
+            --cap-add=ALL \
+            --security-opt=seccomp=unconfined \
+            --security-opt=apparmor=unconfined \
+            --security-opt=label=disable \
             --format oci \
             --tag "$image" \
             "$RUNNER_TEMP/saw-image-context" \
             2>&1 | tee "$RUNNER_TEMP/image-build.log"
-          podman push "$image" \
+          sudo podman push "$image" \
             --digestfile "$RUNNER_TEMP/image.digest" \
             2>&1 | tee -a "$RUNNER_TEMP/image-build.log"
           digest="$(cat "$RUNNER_TEMP/image.digest")"
