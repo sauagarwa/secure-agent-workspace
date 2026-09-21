@@ -3,6 +3,8 @@
 
 # Secret values (never commit)
 values-secret.yaml
+config/saw-platform.yaml
+.env
 .vscode/
 .DS_Store
 jira/
@@ -15,3 +17,6 @@ local-docs/
 graphify-out/
 ssh-keys/
 charts/saw-bom/scripts/__pycache__/
+installer/__pycache__/
+installer/tests/__pycache__/
+tools/saw/__pycache__/

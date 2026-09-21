@@ -1,0 +1,12 @@
+# Replace the placeholder with a QUALIFIED VM disk image digest, not one of
+# the OpenShell CLI/gateway/supervisor component images. Rendering deliberately
+# rejects this placeholder until an actual digest is supplied.
+apiVersion: saw.redhat.com/v1alpha1
+kind: SawGoldenImage
+metadata:
+  name: saw-release-1
+spec:
+  namespace: saw-images
+  registryURL: docker://quay.io/example/saw-vm@sha256:<qualified-digest>
+  registrySecret: saw-image-pull
+  diskSizeGi: 40

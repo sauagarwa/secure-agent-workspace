@@ -79,7 +79,7 @@ if [[ -z "${OIDC_ISSUER}" ]]; then
     KC_HOST=$(oc get route --all-namespaces -l app=keycloak -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true)
   fi
   if [[ -n "${KC_HOST}" ]]; then
-    OIDC_ISSUER="https://${KC_HOST}/realms/openshell"
+    OIDC_ISSUER="https://${KC_HOST}/realms/${KEYCLOAK_REALM:-saw}"
   fi
 fi
 
@@ -99,6 +99,14 @@ DEPLOY_NS="${NS}"
 if [[ "${NAMESPACE_MODE}" == "perUser" ]]; then
   DEPLOY_NS="saw-$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-58)"
   oc create namespace "${DEPLOY_NS}" --dry-run=client -o yaml | oc apply -f - 2>/dev/null
+fi
+
+# --- Compute route hostname ---
+ROUTE_HOST=""
+APPS_DOMAIN=$(oc get ingress.config.openshift.io cluster \
+  -o jsonpath='{.spec.domain}' 2>/dev/null || true)
+if [[ -n "${APPS_DOMAIN}" ]]; then
+  ROUTE_HOST="${OPENSHELL_SAW_NAME}-gateway-${DEPLOY_NS}.${APPS_DOMAIN}"
 fi
 
 # --- Deploy ---
@@ -122,7 +130,8 @@ helm upgrade --install "${OPENSHELL_SAW_NAME}" "${SAW_CHART}" \
   --set namespaceMode="${NAMESPACE_MODE}" \
   --set containerRuntime="${CONTAINER_RUNTIME}" \
   --set governance.enabled="${GOVERNANCE_ENABLED}" \
-  --set route.enabled=true --set route.dashboard=true
+  --set route.enabled=true --set route.dashboard=true \
+  ${ROUTE_HOST:+--set route.host="${ROUTE_HOST}"}
 
 echo ""
 echo "Sandbox '${OPENSHELL_SAW_NAME}' deployed."
@@ -143,4 +152,4 @@ echo ""
 echo "Next steps:"
 echo "  1. make openshell-saw-configure-gateway OPENSHELL_SAW_NAME=${OPENSHELL_SAW_NAME} NS=${DEPLOY_NS}"
 echo "  2. openshell gateway login"
-echo "  3. openshell --gateway-insecure sandbox list"
+echo "  3. openshell sandbox list"
