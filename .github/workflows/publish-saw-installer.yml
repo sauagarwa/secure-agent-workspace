@@ -81,11 +81,12 @@ jobs:
           set -euo pipefail
           owner="$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/saw-installer"
+          cd "$RUNNER_TEMP"
           oras push "$image:$RELEASE" \
             --artifact-type application/vnd.saw.installer.v1+tar \
-            "$RUNNER_TEMP/saw-installer.tar.gz:application/gzip" \
-            "$RUNNER_TEMP/installer-bom.yaml:application/yaml" \
-            "$RUNNER_TEMP/bundle.sha256:text/plain"
+            "saw-installer.tar.gz:application/gzip" \
+            "installer-bom.yaml:application/yaml" \
+            "bundle.sha256:text/plain"
           digest="$(oras manifest fetch --descriptor "$image:$RELEASE" | jq -r .digest)"
           ref="$image@$digest"
           printf 'bundleRef=%s\nbundleDigest=%s\nrelease=%s\n' "$ref" "$digest" "$RELEASE" \
