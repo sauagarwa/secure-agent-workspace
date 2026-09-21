@@ -295,13 +295,14 @@ Follow these steps in order for a new environment.
 
    The same build can be started from GitHub Actions with the manually triggered
    [`Build SAW golden VM image`](.github/workflows/build-saw-golden-image.yml)
-   workflow. Configure the `saw-golden-image` GitHub environment with
-   `OPENSHIFT_SERVER`, `OPENSHIFT_TOKEN`, and `OPENSHIFT_CA_BUNDLE` secrets,
-   then provide the release name and BOM path when dispatching the workflow.
-   The workflow uploads the candidate image reference and build inputs as an
-   artifact; it deliberately stops before promotion and CDI `DataSource`
-   creation so the image can complete the smoke, scan, signature, and approval
-   gates first.
+   workflow. The workflow builds the OCI golden-image artifact directly on the
+   GitHub runner and pushes it to GHCR using the workflow's `GITHUB_TOKEN`; it
+   does not require OpenShift credentials. Configure the repository or
+   environment package-write permission, then provide the release name and BOM
+   path when dispatching the workflow. It uploads the immutable GHCR image
+   reference and build inputs as an artifact; it deliberately stops before
+   promotion and CDI `DataSource` creation so the image can complete the
+   smoke, scan, signature, and approval gates first.
 
 4. Render and run the disposable boot smoke test.
 
