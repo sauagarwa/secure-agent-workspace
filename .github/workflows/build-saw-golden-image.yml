@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: saw-golden-image-${{ inputs.release_name }}
@@ -63,60 +64,39 @@ jobs:
             --installer-bom "$BOM" \
             --output "$RUNNER_TEMP/saw-image-context"
 
-      - name: Install OpenShift CLI
-        uses: redhat-actions/oc-installer@v1
-
-      - name: Log in to OpenShift
-        env:
-          OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
-          OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
-          OPENSHIFT_CA_BUNDLE: ${{ secrets.OPENSHIFT_CA_BUNDLE }}
+      - name: Install Podman
         run: |
           set -euo pipefail
-          test -n "$OPENSHIFT_SERVER"
-          test -n "$OPENSHIFT_TOKEN"
-          test -n "$OPENSHIFT_CA_BUNDLE"
-          ca_file="$RUNNER_TEMP/openshift-ca.crt"
-          printf '%s\n' "$OPENSHIFT_CA_BUNDLE" > "$ca_file"
-          oc login "$OPENSHIFT_SERVER" \
-            --token="$OPENSHIFT_TOKEN" \
-            --certificate-authority="$ca_file"
-          oc whoami
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y podman
 
-      - name: Start isolated OpenShift image build
+      - name: Build and push golden image to GHCR
         env:
-          SAW_IMAGE_BUILD_NAMESPACE: saw-installer-validation
-        run: |
-          set -euo pipefail
-          make saw-image-build \
-            SAW_IMAGE_CONTEXT="$RUNNER_TEMP/saw-image-context" \
-            SAW_IMAGE_BUILD_NAMESPACE="$SAW_IMAGE_BUILD_NAMESPACE" \
-            | tee "$RUNNER_TEMP/image-build.log"
-
-      - name: Capture candidate image digest
-        id: image
-        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_OWNER: ${{ github.repository_owner }}
           RELEASE: ${{ steps.release.outputs.release }}
         run: |
           set -euo pipefail
-          namespace=saw-installer-validation
-          build_name="$(oc get build -n "$namespace" \
-            -l buildconfig=saw-installer \
-            --sort-by=.metadata.creationTimestamp \
-            -o jsonpath='{.items[-1:].metadata.name}')"
-          digest="$(oc get build "$build_name" -n "$namespace" -o jsonpath='{.status.output.to.imageDigest}')"
-          repository="$(oc get imagestream saw-installer -n "$namespace" -o jsonpath='{.status.dockerImageRepository}')"
-          test -n "$digest"
-          test -n "$repository"
-          image_ref="$repository@$digest"
+          owner="$(printf '%s' "$GH_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/saw-golden-image:${RELEASE}"
+          printf '%s' "$GH_TOKEN" | podman login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+          podman build --privileged \
+            --format oci \
+            --tag "$image" \
+            "$RUNNER_TEMP/saw-image-context" \
+            2>&1 | tee "$RUNNER_TEMP/image-build.log"
+          podman push "$image" \
+            --digestfile "$RUNNER_TEMP/image.digest" \
+            2>&1 | tee -a "$RUNNER_TEMP/image-build.log"
+          digest="$(cat "$RUNNER_TEMP/image.digest")"
+          image_ref="ghcr.io/${owner}/saw-golden-image@${digest}"
           {
             echo "release=$RELEASE"
-            echo "buildName=$build_name"
             echo "imageRef=$image_ref"
             echo "imageDigest=$digest"
-            echo "namespace=$namespace"
+            echo "registryURL=docker://$image_ref"
           } | tee "$RUNNER_TEMP/saw-golden-image-release.txt"
-          echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
 
       - name: Upload candidate metadata
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
@@ -128,9 +108,6 @@ jobs:
             ${{ runner.temp }}/saw-image-context/build-inputs.json
 
       - name: Print promotion instructions
-        env:
-          IMAGE_REF: ${{ steps.image.outputs.image_ref }}
         run: |
-          echo "Candidate image: $IMAGE_REF"
-          echo "Complete smoke, scan, signature, and approval gates before publishing it in sawBlueprint.goldenImages[].registryURL."
+          echo "The image is in GHCR. Complete smoke, scan, signature, and approval gates before using its registryURL in sawBlueprint.goldenImages[]."
           echo "The workflow intentionally does not create the production CDI DataSource."
