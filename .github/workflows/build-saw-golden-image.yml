@@ -64,11 +64,110 @@ jobs:
             --installer-bom "$BOM" \
             --output "$RUNNER_TEMP/saw-image-context"
 
-      - name: Install Podman
+      - name: Prepare host-native VM image build
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y podman
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | \
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y \
+            libguestfs-tools qemu-utils qemu-system-x86 curl
+          sudo chmod +r /boot/vmlinuz-* 2>/dev/null || true
+          sudo update-guestfs-appliance 2>/dev/null || true
+
+      - name: Cache Fedora Cloud base image
+        id: fedora-cache
+        uses: actions/cache@v4
+        with:
+          path: fedora-base.qcow2
+          key: fedora-cloud-44-1.7-x86_64
+
+      - name: Download Fedora Cloud base image
+        if: steps.fedora-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            --output fedora-base.qcow2 \
+            https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+          echo '28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f  fedora-base.qcow2' | sha256sum --check
+
+      - name: Extract pinned runtime artifacts
+        env:
+          BOM: ${{ steps.release.outputs.bom }}
+        run: |
+          set -euo pipefail
+          cli_image="$(python - "$BOM" <<'PY'
+          import sys, yaml
+          print(yaml.safe_load(open(sys.argv[1]))['spec']['openshell']['cli']['image'])
+          PY
+          )"
+          gateway_image="$(python - "$BOM" <<'PY'
+          import sys, yaml
+          print(yaml.safe_load(open(sys.argv[1]))['spec']['openshell']['gateway']['image'])
+          PY
+          )"
+          supervisor_image="$(python - "$BOM" <<'PY'
+          import sys, yaml
+          print(yaml.safe_load(open(sys.argv[1]))['spec']['openshell']['supervisor']['image'])
+          PY
+          )"
+          payload="$RUNNER_TEMP/payload"
+          mkdir -p "$payload"
+
+          docker pull "$cli_image"
+          cli_container="$(docker create "$cli_image")"
+          docker cp "$cli_container:/usr/local/bin/openshell" "$payload/openshell"
+          docker rm "$cli_container" >/dev/null
+
+          docker pull "$gateway_image"
+          gateway_container="$(docker create "$gateway_image")"
+          docker cp "$gateway_container:/usr/local/bin/openshell-gateway" "$payload/openshell-gateway"
+          docker rm "$gateway_container" >/dev/null
+
+          docker pull "$supervisor_image"
+          supervisor_container="$(docker create "$supervisor_image")"
+          docker cp "$supervisor_container:/openshell-sandbox" "$payload/openshell-supervisor"
+          docker rm "$supervisor_container" >/dev/null
+          chmod 0755 "$payload"/*
+
+      - name: Customize QCOW2 on the GitHub host
+        env:
+          BOM: ${{ steps.release.outputs.bom }}
+        run: |
+          set -euo pipefail
+          guest="$RUNNER_TEMP/guest-root"
+          cp fedora-base.qcow2 "$RUNNER_TEMP/base.qcow2"
+          sudo mkdir -p "$guest"
+          sudo guestmount -a "$RUNNER_TEMP/base.qcow2" -i --rw "$guest"
+          cleanup() {
+            sudo umount "$guest/dev/pts" "$guest/dev" "$guest/sys" "$guest/proc" 2>/dev/null || true
+            sudo guestunmount "$guest" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          sudo mount -t proc proc "$guest/proc"
+          sudo mount -t sysfs sys "$guest/sys"
+          sudo mount --bind /dev "$guest/dev"
+          sudo mount --bind /dev/pts "$guest/dev/pts"
+          echo 'nameserver 8.8.8.8' | sudo tee "$guest/etc/resolv.conf" >/dev/null
+
+          sudo chroot "$guest" dnf install -y \
+            podman shadow-utils slirp4netns passt fuse-overlayfs python3 \
+            python3-pyyaml cloud-init qemu-guest-agent openssl
+          sudo mkdir -p "$guest/opt/payload"
+          sudo cp "$RUNNER_TEMP/payload"/* "$guest/opt/payload/"
+          sudo cp "$RUNNER_TEMP/saw-image-context/guest.tar.gz" "$guest/opt/guest.tar.gz"
+          sudo cp "$RUNNER_TEMP/saw-image-context/customize.sh" "$guest/opt/customize.sh"
+          sudo chmod 0755 "$guest/opt/customize.sh"
+          sudo chroot "$guest" /opt/customize.sh
+          sudo touch "$guest/.autorelabel"
+
+          cleanup
+          trap - EXIT
+          while sudo fuser "$RUNNER_TEMP/base.qcow2" >/dev/null 2>&1; do sleep 1; done
+          qemu-img convert -c -O qcow2 "$RUNNER_TEMP/base.qcow2" "$RUNNER_TEMP/disk.qcow2"
 
       - name: Build and push golden image to GHCR
         env:
@@ -79,22 +178,24 @@ jobs:
           set -euo pipefail
           owner="$(printf '%s' "$GH_OWNER" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/saw-golden-image:${RELEASE}"
-          printf '%s' "$GH_TOKEN" | sudo podman login ghcr.io \
+          oci_context="$RUNNER_TEMP/oci-context"
+          mkdir -p "$oci_context"
+          cp "$RUNNER_TEMP/disk.qcow2" "$oci_context/disk.qcow2"
+          printf '%s\n' 'FROM scratch' 'COPY disk.qcow2 /disk/disk.qcow2' > "$oci_context/Dockerfile"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io \
             --username "$GITHUB_ACTOR" --password-stdin
-          sudo podman build \
-            --isolation=chroot \
-            --cap-add=ALL \
-            --security-opt=seccomp=unconfined \
-            --security-opt=apparmor=unconfined \
-            --security-opt=label=disable \
-            --format oci \
+          docker buildx build \
+            --file "$oci_context/Dockerfile" \
             --tag "$image" \
-            "$RUNNER_TEMP/saw-image-context" \
-            2>&1 | tee "$RUNNER_TEMP/image-build.log"
-          sudo podman push "$image" \
-            --digestfile "$RUNNER_TEMP/image.digest" \
-            2>&1 | tee -a "$RUNNER_TEMP/image-build.log"
-          digest="$(cat "$RUNNER_TEMP/image.digest")"
+            --push \
+            --provenance=false \
+            --metadata-file "$RUNNER_TEMP/image-metadata.json" \
+            "$oci_context" 2>&1 | tee "$RUNNER_TEMP/image-build.log"
+          digest="$(python - "$RUNNER_TEMP/image-metadata.json" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1]))['containerimage.digest'])
+          PY
+          )"
           image_ref="ghcr.io/${owner}/saw-golden-image@${digest}"
           {
             echo "release=$RELEASE"
