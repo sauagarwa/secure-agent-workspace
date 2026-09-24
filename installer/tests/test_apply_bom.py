@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from apply_bom import (  # noqa: E402
     Provider,
+    Sandbox,
     Workspace,
     check_provider_type_mismatch,
     find_provider,

@@ -63,6 +63,12 @@ Software changes relative to the image-bundled release return
 SoftwareUpgradeNotImplemented. Provider verification checks metadata, not masked
 credential bytes or successful external authentication.
 
+The preserved `--profiles-dir` legacy path carries the upstream Podman runtime
+selection and generic-sandbox fallback fixes: Podman is the default, an
+`Error` or `Completed` sandbox is recreated, and fallback sandboxes run a
+detached keep-alive command. This does not enable sandboxes in the versioned
+mounted-input path, which still rejects them before mutation.
+
 First qualify the clean image build and basic boot against the real runtime.
 Only then implement retained-data sandbox lifecycle and workload verification in
 apply_bom.py, followed by external OIDC access and remaining ESO/Vault/CDI/CNI,
