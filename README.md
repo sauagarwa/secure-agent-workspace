@@ -900,6 +900,11 @@ not create a shared profile Secret.
 
 Use the disposable live-cluster isolation gate after onboarding two tenants:
 
+Do not run the legacy root `make test` headless quickstart against an Option A
+GitOps deployment; it creates its own sandbox. Use `make saw-test-fast` for
+offline contracts and the disposable tenant integration gate below for live
+GitOps isolation checks.
+
 ```bash
 make saw-test-tenant-integration \
   SAW_TEST_ALICE_NAMESPACE=saw-... \
