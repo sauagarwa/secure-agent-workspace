@@ -55,8 +55,9 @@ providers in new, explicitly owned workspaces. Existing unlabeled workspaces,
 including built-in default, are not automatically adopted. See the exact
 [guest prerequisites and boundaries](../guest/README.md#workspaceprovider-increment).
 
-Profiles with enabled sandboxes are rejected before mutation; safe sandbox
-creation/replacement remains unimplemented. Explicit workspace inference is
+Profiles with enabled sandboxes are rejected before mutation with
+`SandboxApplyNotImplemented`; safe sandbox creation/replacement remains
+unimplemented. Explicit workspace inference is
 applied and read back; legacy provider model/NemoClaw settings are rejected.
 Software changes relative to the image-bundled release return
 SoftwareUpgradeNotImplemented. Provider verification checks metadata, not masked

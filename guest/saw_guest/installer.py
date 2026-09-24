@@ -1,4 +1,4 @@
-"""Invoke the image-owned apply_bom.py; no OpenShell API or version knowledge."""
+"""Invoke only the verified platform release bundle."""
 
 import json
 import os
@@ -10,22 +10,25 @@ from pathlib import Path
 
 from .inputs import canonical
 from .errors import InstallerFailed
+from .release import ReleaseError, ensure_release
 
-SCRIPT = Path("/opt/saw/installer/apply_bom.py")
+SCRIPT = Path("/var/lib/saw/releases/current/apply_bom.py")
 
 
 class BomInstaller:
     def call(self, phase, revision):
         try:
-            for path in [SCRIPT, *SCRIPT.parents]:
+            script = (ensure_release() / "apply_bom.py"
+                      if SCRIPT == Path("/var/lib/saw/releases/current/apply_bom.py") else SCRIPT)
+            for path in [script, *script.parents]:
                 info = path.lstat()
                 if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
                     raise InstallerFailed()
-            if not SCRIPT.is_file():
+            if not script.is_file():
                 raise InstallerFailed()
             with tempfile.TemporaryFile() as output:
                 with subprocess.Popen(
-                    ["/usr/bin/python3", "-I", str(SCRIPT), "--guest-phase", phase],
+                    ["/usr/bin/python3", "-I", str(script), "--guest-phase", phase],
                     stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
                     text=True, start_new_session=True,
                     env={"PATH": "/usr/local/bin:/usr/sbin:/usr/bin", "LANG": "C.UTF-8"},
@@ -57,7 +60,7 @@ class BomInstaller:
             if not ok and phase != 'verify':
                 raise InstallerFailed(reply.get('reason'), phase)
             return ok
-        except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError, ReleaseError):
             raise InstallerFailed() from None
 
     def preflight(self, revision):

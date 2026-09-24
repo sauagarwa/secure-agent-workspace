@@ -20,3 +20,7 @@ charts/saw-bom/scripts/__pycache__/
 installer/__pycache__/
 installer/tests/__pycache__/
 tools/saw/__pycache__/
+config/users/*/secret.yaml
+config/users/*/user.yaml
+__pycache__/
+*.py[cod]

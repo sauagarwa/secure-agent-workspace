@@ -14,9 +14,9 @@ def test_vault_plan_is_tenant_scoped_and_does_not_apply(tmp_path):
                 "issuer": "https://identity.example.test/realms/saw",
                 "vault": {"mount": "kubernetes", "prefix": "saw/users", "authMount": "kubernetes", "audience": "vault"},
             },
-            "tenants": [{"name": "research", "subject": "immutable-alice", "credentials": [
-                {"name": "inference", "remoteKey": "nvidia", "properties": {"api_key": "api_key"}},
-                {"name": "search", "remoteKey": "brave", "properties": {"api_key": "api_key"}},
+            "tenants": [{"name": "research", "subject": "immutable-alice", "username": "alice", "credentials": [
+                {"name": "inference", "remoteKey": "nvidia", "keys": ["api_key"]},
+                {"name": "search", "remoteKey": "brave", "keys": ["api_key"]},
             ]}],
         }
     }

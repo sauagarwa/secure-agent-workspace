@@ -5,6 +5,9 @@
 # mutable image tags here. ESO retrieves provider values from Vault; the VM sees
 # only explicitly declared Secret keys through read-only mounts.
 openshellSaw:
+  # Namespace creation is owned by Helm --create-namespace or Argo's
+  # CreateNamespace sync option, not by this chart's resource set.
+  createNamespace: false
   # Shared identity and Vault connection. saw-blueprint supplies these globally.
   platform: {}
   # platform:
@@ -12,18 +15,20 @@ openshellSaw:
   #   vault: {server: https://vault.example.com, mount: secret, prefix: saw/users, authMount: kubernetes, audience: vault, caBundle: "<public CA PEM>"}
 
   # One user/SAW identity. Namespace identity derives from issuer + subject + name;
-  # username is display metadata only.
+  # username is display metadata and is used as the default Vault prefix suffix.
   tenant: {}
   # tenant:
   #   name: research
   #   subject: immutable-oidc-subject
   #   username: alice
-  #   credentials: [{name: inference-main, remoteKey: nvidia, properties: {api_key: api_key}}]
+  #   credentials: [{name: nvidia, remoteKey: nvidia, keys: [type, model, endpoint, api_key]}]
+  # Rendered user values set vaultPrefix (for example saw/alice) and
+  # providerCredentials. Each provider becomes a Secret named remoteKey.
 
   # Approved shared CDI DataSource. The chart clones it to the tenant's private
   # saw-root DataVolume; never set a registry URL or pull Secret here.
   image: {}
-  # image: {namespace: saw-images, dataSource: qualified-saw-release-<hash>, diskSizeGi: 40}
+  # image: {namespace: saw-images, dataSource: qualified-saw-release-<hash>, diskSizeGi: 40, storageClassName: optional}
 
   # Instance selects reviewed workspace profiles and binds logical credential names
   # to ESO Secret keys. The chart derives ownerSubject from tenant.subject.
@@ -32,8 +37,8 @@ openshellSaw:
   #   workspaces:
   #       - profileRef: {name: data-science, configMapRef: {name: profiles}}
   #         credentialBindings:
-  #           inference-main:
-  #             secretRef: {name: saw-provider-inference-main, key: api_key}
+  #           nvidia:
+  #             secretRef: {name: nvidia, key: api_key}
 
   # Public, reviewed profile documents. Every item becomes a read-only ConfigMap
   # mounted in the VM. Keys use profiles__<profile>__<workspace>__<type>.yaml.
@@ -54,7 +59,7 @@ openshellSaw:
   #   name: saw-2026-09
   #   bundleRef: registry.example.com/saw-installer@sha256:<64-hex-digest>
   #   bundleDigest: sha256:<64-hex-digest>
-  #   bom: {installerVersion: 0.1.0, openshell: {cli: {...}, gateway: {...}, supervisor: {...}}}
+  #   bom: {installerVersion: 0.2.0, openshell: {cli: {...}, gateway: {...}, supervisor: {...}}}
 
   # Set enabled to create the VM. Halted creates it but does not boot it; use
   # Always only after the image and installer release are qualified.

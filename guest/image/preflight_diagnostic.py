@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path[:0] = ['/opt/saw/guest', '/opt/saw/installer']
+sys.path[:0] = ['/opt/saw/guest', '/var/lib/saw/releases/current']
 import apply_bom  # noqa: E402
 from saw_guest.inputs import MountedInputs  # noqa: E402
 
@@ -54,7 +54,7 @@ def main():
         # Only a fixed vocabulary is logged, never stdout/stderr or exception text.
         reasons = {'UnqualifiedGatewayUnit', 'GatewayUnitMismatch', 'UnsafeGatewayState',
                    'GatewayBootstrapCommandFailed', 'RootlessCommandFailed', 'UnsafeRootlessSocket',
-                   'RootlessEngineRequired', 'SoftwareReleaseMismatch', 'SoftwareUpgradeNotImplemented',
+                   'RootlessEngineRequired', 'SandboxApplyNotImplemented', 'SoftwareReleaseMismatch', 'SoftwareUpgradeNotImplemented',
                    'UnsafeRootlessAccount', 'RootlessSubordinateIDsRequired', 'InvalidMachineIdentity'}
         code = str(error) if isinstance(error, apply_bom.InstallerError) and str(error) in reasons else 'Unavailable'
         category = next((name for cls, name in ((FileNotFoundError, 'FileNotFound'),

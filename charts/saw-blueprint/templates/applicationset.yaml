@@ -4,6 +4,7 @@
 {{- if or (not $set.repoURL) (not $set.targetRevision) }}{{ fail "applicationSet.repoURL and applicationSet.targetRevision are required when enabled" }}{{ end }}
 {{- if eq (len $cfg.tenants) 0 }}{{ fail "applicationSet requires at least one Git-defined tenant enrollment" }}{{ end }}
 {{- $seen := dict }}
+{{- $seenVaultPrefixes := dict }}
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
@@ -28,12 +29,17 @@ spec:
         {{- if ne (len $matches) 1 }}{{ fail "goldenImageRef must match exactly one approved golden image" }}{{ end }}
         {{- $sourceImage := first $matches }}
         {{- $image := dict "namespace" $cfg.imageNamespace "dataSource" (include "saw-blueprint.imageName" $sourceImage) "diskSizeGi" $sourceImage.diskSizeGi }}
+        {{- with $sourceImage.storageClass }}{{- $_ := set $image "storageClassName" . }}{{- end }}
         {{- $releaseName := $tenant.installerReleaseRef | default $cfg.installer.defaultRelease }}
         {{- $releaseMatches := list }}
         {{- range $release := $cfg.installer.releases }}{{- if eq $release.name $releaseName }}{{ $releaseMatches = append $releaseMatches $release }}{{ end }}{{- end }}
         {{- if ne (len $releaseMatches) 1 }}{{ fail "tenant installer release must match exactly one configured global release" }}{{ end }}
         {{- if hasKey $seen $ns }}{{ fail "duplicate tenant enrollment" }}{{ end }}
         {{- $_ := set $seen $ns true }}
+        {{- $username := $tenant.username }}
+        {{- $vaultPrefix := $tenant.vaultPrefix | default (printf "%s/%s" (trimSuffix "/" $cfg.platform.vault.prefix) $username) }}
+        {{- if hasKey $seenVaultPrefixes $vaultPrefix }}{{ fail "each tenant must use a unique Vault prefix" }}{{ end }}
+        {{- $_ := set $seenVaultPrefixes $vaultPrefix true }}
           - name: {{ printf "saw-%s" ($identity | trunc 24) | quote }}
             namespace: {{ $ns | quote }}
             platform: {{ $cfg.platform | toJson | quote }}

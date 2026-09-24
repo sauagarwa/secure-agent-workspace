@@ -25,7 +25,7 @@ BindReadOnlyPaths=/run/user
 PrivateTmp=true
 LimitCORE=0
 MemoryMax=512M
-# apply_bom.py may access local container sockets. Its eventual write paths
+# The verified release may access local container sockets. Its write paths
 # and SELinux policy need qualification; do not widen this to the entire root FS.
 ReadWritePaths=/var/lib/saw
 

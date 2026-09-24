@@ -35,7 +35,7 @@ from pathlib import Path
 
 import yaml
 
-INSTALLER_VERSION = "0.1.0"
+INSTALLER_VERSION = "0.2.0"
 COMPONENT_BINARIES = {
     "cli": "/usr/local/bin/openshell",
     "gateway": "/usr/local/bin/openshell-gateway",
@@ -99,10 +99,10 @@ def validate_guest_release(snapshot):
     """All release-specific safety/compatibility decisions live in this file."""
     bom = validate_installer_bom(snapshot["installerBOM"])
     installed = load_installer_bom("/opt/saw/installer/installer-bom.yaml")
-    if bom["spec"] != installed["spec"]:
+    if bom["spec"]["openshell"] != installed["spec"]["openshell"]:
         # Do not overwrite running binaries just because a ConfigMap changed.
-        # This bootstrap slice expects image-installed software. A later release
-        # can implement a controlled upgrade here; the guest service is unchanged.
+        # Installer logic is independently versioned in the signed release;
+        # OpenShell payload upgrades still require a matching golden image.
         raise InstallerError("SoftwareUpgradeNotImplemented")
     validate_guest_profiles(snapshot)
     verify_installed_software(bom)
@@ -115,6 +115,7 @@ GUEST_GATEWAY_UNIT = Path("/etc/systemd/system/saw-openshell-gateway.service")
 GUEST_BUILD_MANIFEST = Path("/opt/saw/installer/build.json")
 GUEST_VENDOR_DROPIN = Path('/usr/lib/systemd/system/service.d/10-timeout-abort.conf')
 GUEST_INSTALLED_BOM = Path("/opt/saw/installer/installer-bom.yaml")
+GUEST_SETTINGS_PATH = Path("/etc/saw/guest.json")
 GUEST_RUNTIME_USER = "cloud-user"
 GUEST_PKI_FILES = ("ca.crt", "ca.key", "server/tls.crt", "server/tls.key",
                    "client/tls.crt", "client/tls.key", "jwt/signing.pem", "jwt/public.pem", "jwt/kid")
@@ -135,9 +136,7 @@ def guest_owner_label(snapshot):
 def validate_guest_profiles(snapshot):
     """Revalidate the normalized private input using the shared profile parser.
 
-    No permissive conversion into the legacy deployer's dataclasses. In this
-    increment, a profile with enabled sandboxes is rejected as a whole,
-    before even the first workspace/provider can be changed.
+    No permissive conversion into the legacy deployer's dataclasses.
     """
     from openshell_saw.blueprints import fields, string
     from openshell_saw.profiles import resolve_profiles
@@ -173,6 +172,10 @@ def validate_guest_profiles(snapshot):
         if not spec.get("enabled", True):
             continue
         if any(s.get("enabled", True) for s in ws["sandboxes"]):
+            # The current installer does not implement sandbox type-specific
+            # startup, persistent data mounts, or replacement semantics. Fail
+            # before creating workspaces or providers instead of reporting a
+            # short-lived placeholder command as a ready sandbox.
             raise InstallerError("SandboxApplyNotImplemented")
         if any(p.get("model") or p.get("nemoclawProvider") for p in ws["providers"]):
             raise InstallerError("ExplicitWorkspaceInferenceRequired")
@@ -351,11 +354,29 @@ def guest_boot_identity(snapshot):
     return {"enrollment": snapshot["enrollmentIdentity"], "machineId": machine, "productUUID": product}
 
 
-def guest_gateway_config():
+def load_guest_settings():
+    from saw_guest.inputs import validate_settings
+    try:
+        settings = json.loads(guest_private_read(GUEST_SETTINGS_PATH))
+        return validate_settings(settings)
+    except (ValueError, TypeError):
+        raise InstallerError("InvalidOrUnavailableInstallerInput") from None
+
+
+def guest_gateway_config(settings):
     """Fixed local bootstrap policy, not tenant-supplied TOML or shell content."""
     root = GUEST_GATEWAY_ROOT
     account = guest_runtime_account()
     supervisor_image = load_installer_bom(GUEST_INSTALLED_BOM)["spec"]["openshell"]["supervisor"]["image"]
+    issuer = settings.get("oidcIssuer", "")
+    audience = settings.get("oidcAudience", "openshell-cli")
+    oidc = f'''[openshell.gateway.oidc]
+issuer = "{issuer}"
+audience = "{audience}"
+roles_claim = "realm_access.roles"
+admin_role = "openshell-admin"
+user_role = "openshell-user"
+'''.encode() if issuer else b""
     return f'''[openshell]
 version = 1
 [openshell.gateway]
@@ -368,7 +389,7 @@ provider_profile_sources = [{{ type = "builtin" }}]
 allow_unauthenticated_users = false
 [openshell.gateway.mtls_auth]
 enabled = true
-[openshell.gateway.tls]
+'''.encode() + oidc + f'''[openshell.gateway.tls]
 cert_path = "{root}/tls/server/tls.crt"
 key_path = "{root}/tls/server/tls.key"
 client_ca_path = "{root}/tls/ca.crt"
@@ -425,12 +446,12 @@ def guest_gateway_service():
     return properties["ActiveState"] == "active"
 
 
-def check_guest_gateway_state(identity):
+def check_guest_gateway_state(identity, settings):
     trusted_guest_path(GUEST_GATEWAY_ROOT, private=True)
     record = json.loads(guest_private_read(GUEST_GATEWAY_ROOT / "bootstrap.json"))
     if record.get("version") != 1 or record.get("identity") != identity:
         raise InstallerError("GatewayIdentityMismatch")
-    if guest_private_read(GUEST_GATEWAY_ROOT / "gateway.toml") != guest_gateway_config():
+    if guest_private_read(GUEST_GATEWAY_ROOT / "gateway.toml") != guest_gateway_config(settings):
         raise InstallerError("GatewayConfigRequiresMigration")
     if set(record.get("pki", {})) != set(GUEST_PKI_FILES):
         raise InstallerError("InvalidGatewayState")
@@ -474,7 +495,7 @@ def guest_publish_directory(staging, destination):
             os.close(fd)
 
 
-def create_guest_gateway(identity):
+def create_guest_gateway(identity, settings):
     # Generate only in a new private staging directory. Never rerun certgen on
     # active PKI: some releases regenerate the CA when SANs change.
     with tempfile.TemporaryDirectory(prefix=".saw-gateway-", dir=GUEST_GATEWAY_ROOT.parent) as temporary:
@@ -493,7 +514,7 @@ def create_guest_gateway(identity):
         context = ssl.create_default_context(cafile=str(tls / "ca.crt"))
         for role in ("server", "client"):
             context.load_cert_chain(str(tls / role / "tls.crt"), str(tls / role / "tls.key"))
-        guest_write_private(staging / "gateway.toml", guest_gateway_config())
+        guest_write_private(staging / "gateway.toml", guest_gateway_config(settings))
         guest_write_private(staging / "bootstrap.json", json.dumps({"version": 1, "identity": identity,
                                                                     "pki": hashes}, sort_keys=True).encode())
         (staging / "state").mkdir(mode=0o700)
@@ -522,13 +543,14 @@ def ensure_guest_gateway_client(apply=False):
 
 def prepare_guest_gateway(snapshot, phase):
     """Read-only preflight/verify; only apply may publish identity/start service."""
+    settings = load_guest_settings()
     identity = guest_boot_identity(snapshot)
     runtime_ready = prepare_rootless_podman()
     active = guest_gateway_service()
     trusted_guest_path(GUEST_GATEWAY_ROOT.parent)
     exists = GUEST_GATEWAY_ROOT.exists() or GUEST_GATEWAY_ROOT.is_symlink()
     if exists:
-        check_guest_gateway_state(identity)
+        check_guest_gateway_state(identity, settings)
     elif active or GUEST_CLIENT_CONFIG.exists() or GUEST_CLIENT_CONFIG.is_symlink():
         raise InstallerError("UnownedGatewayState")
     if not active:
@@ -546,7 +568,7 @@ def prepare_guest_gateway(snapshot, phase):
         guest_list(["workspace", "list"])
         return True
     if not exists:
-        create_guest_gateway(identity)
+        create_guest_gateway(identity, settings)
     ensure_guest_gateway_client(apply=True)
     grant_gateway_runtime_access()
     prepare_rootless_podman(apply=True)
@@ -567,8 +589,8 @@ def guest_gateway_check():
     """Systemd restart guard: never start retained gateway state on a clone."""
     try:
         from saw_guest.inputs import validate_settings
-        settings = validate_settings(json.loads(guest_private_read(Path("/etc/saw/guest.json"))))
-        check_guest_gateway_state(guest_boot_identity(settings))
+        settings = load_guest_settings()
+        check_guest_gateway_state(guest_boot_identity(settings), settings)
         return 0
     except Exception:
         # Never emit raw settings, keys, errors or tracebacks to the journal.
@@ -1159,52 +1181,7 @@ class WorkspaceDeployer:
         self.sh.run(args, check=False)
 
     def create_sandbox_generic(self, sandbox, workspace_name="default"):
-        ws_args = (["--workspace", workspace_name]
-                   if workspace_name != "default" else [])
-        rc, out, _ = self.sh.run(
-            ["openshell", "sandbox", "get", sandbox.name] + ws_args,
-            check=False)
-        if rc == 0:
-            clean = re.sub(r'\x1b\[[0-9;]*m', '', out)
-            if "Error" in clean:
-                log(f"Sandbox '{sandbox.name}' is in Error state, "
-                    "recreating...")
-                self.sh.run(
-                    ["openshell", "sandbox", "delete",
-                     sandbox.name] + ws_args,
-                    check=False)
-            else:
-                log(f"Sandbox '{sandbox.name}' already exists")
-                return
-        is_full_ref = sandbox.image and ("/" in sandbox.image or ":" in sandbox.image)
-        if is_full_ref:
-            self.sh.run(["sudo", "docker", "pull", sandbox.image], check=False)
-        args = ["openshell", "sandbox", "create", "--name", sandbox.name]
-        if sandbox.image:
-            args += ["--from", sandbox.image]
-        if workspace_name != "default":
-            args += ["--workspace", workspace_name]
-        for prov in sandbox.providers:
-            args += ["--provider", prov]
-        args += ["--no-tty", "--", "sh", "-c", "echo sandbox-ready"]
-        rc, out, err = self.sh.run(args, check=False)
-        combined = re.sub(r'\x1b\[[0-9;]*m', '',
-                          (out or "") + " " + (err or ""))
-        if "Error" in combined or "Restarting" in combined:
-            log("Sandbox entered Error state, waiting 10s for logs...")
-            if not self.sh.dry_run:
-                time.sleep(10)
-            self.sh.run([
-                "bash", "-c",
-                "CNAME=$(sudo docker ps -a "
-                f"--filter 'name=openshell.*{sandbox.name}' "
-                "--format '{{.Names}}' | head -1) && "
-                "echo \"Container: $CNAME\" && "
-                "echo \"Status: $(sudo docker inspect $CNAME "
-                "--format '{{.State.Status}} ExitCode={{.State.ExitCode}}')"
-                "\" && echo '--- logs ---' && "
-                "sudo docker logs $CNAME 2>&1 | tail -30"
-            ], check=False)
+        raise RuntimeError("SandboxApplyNotImplemented")
 
     def chown_sandbox_home(self, sandbox_name):
         """Chown /sandbox to the supervisor's sandbox uid.
@@ -1543,6 +1520,9 @@ def main():
 
     # --- Parse profiles ---
     profiles = parse_profiles(args.profiles_dir)
+    if any(ws.enabled and sb.enabled
+           for profile in profiles for ws in profile.workspaces for sb in ws.sandboxes):
+        parser.error("enabled sandbox profiles are not implemented (SandboxApplyNotImplemented)")
     if not profiles:
         log("No profiles found, nothing to do")
         return
@@ -1551,19 +1531,14 @@ def main():
     banner(f"BOM Apply: {len(profiles)} profile(s), "
            f"{total_ws} workspace(s)")
 
-    oidc_gw = args.oidc_gateway or os.environ.get("OPENSHELL_GATEWAY", "")
     sh = Shell(dry_run=args.dry_run)
 
     # --- Phase 1: Gateway setup ---
     banner("Phase 1: Gateway Setup")
-    gw = GatewaySetup(sh, oidc_gw, args.mtls_gateway)
-
-    oidc_token = os.environ.get("OIDC_TOKEN", "")
-    gw.configure_oidc(
-        oidc_token,
-        os.environ.get("OIDC_ISSUER", ""),
-        os.environ.get("OIDC_CLIENT_ID", "openshell-cli"),
-    )
+    # Bootstrap and BOM application use only the local mTLS identity. OIDC
+    # is configured on the gateway for laptop clients; no user login or
+    # password/token is required from the setup path.
+    gw = GatewaySetup(sh, "", args.mtls_gateway)
     gw.register_mtls_gateway()
     gw.grant_default_workspace_access()
     gw.enable_providers_v2()

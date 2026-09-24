@@ -11,21 +11,23 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools/saw'))
 from build_guest_bundle import load_installer_bom  # noqa: E402
-from openshell_saw.blueprints import string  # noqa: E402
+from openshell_saw.blueprints import name as validate_name, string  # noqa: E402
 
 NAMESPACE = 'saw-installer-validation'
 
 
-def resources(bom, image, name='installer-smoke', diagnostics=False):
+def resources(bom, image, name='installer-smoke', diagnostics=False, release=None,
+              namespace=NAMESPACE):
     string(image, 'image', r'[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}', limit=512)
     string(name, 'name', r'[a-z][a-z0-9-]*[a-z0-9]', limit=40)
+    validate_name(namespace, 'namespace')
     intent_name, installer_name, profiles_name = (f'{name}-{suffix}' for suffix in ('intent', 'installer', 'profiles'))
     def obj(kind, name, **kwargs):
         return {'apiVersion': 'v1', 'kind': kind,
-                'metadata': {'name': name, 'namespace': NAMESPACE}, **kwargs}
+                'metadata': {'name': name, 'namespace': namespace}, **kwargs}
 
-    settings = {'namespace': NAMESPACE, 'instance': name, 'ownerSubject': 'smoke-owner',
-                'enrollmentIdentity': hashlib.sha256(f'{NAMESPACE}/{name}'.encode()).hexdigest(),
+    settings = {'namespace': namespace, 'instance': name, 'ownerSubject': 'smoke-owner',
+                'enrollmentIdentity': hashlib.sha256(f'{namespace}/{name}'.encode()).hexdigest(),
                 'profileConfigMaps': [profiles_name], 'providerSecrets': {}}
     instance = {'apiVersion': 'saw.redhat.com/v1alpha1', 'kind': 'SawInstance',
                 'metadata': {'name': name},
@@ -59,9 +61,12 @@ def resources(bom, image, name='installer-smoke', diagnostics=False):
                         '[Install]\nWantedBy=timers.target\n'}])
         cloud['runcmd'].insert(0, ['systemctl', 'daemon-reload'])
         cloud['runcmd'].append(['systemctl', 'enable', '--now', 'saw-qualification.timer'])
+    installer_data = {'installer-bom.yaml': yaml.safe_dump(bom)}
+    if release:
+        installer_data['release.yaml'] = yaml.safe_dump(release)
     result = [obj('ServiceAccount', f'{name}-guest', automountServiceAccountToken=False),
               obj('ConfigMap', intent_name, data={'instance.yaml': yaml.safe_dump(instance)}),
-              obj('ConfigMap', installer_name, data={'installer-bom.yaml': yaml.safe_dump(bom)}),
+              obj('ConfigMap', installer_name, data=installer_data),
               obj('ConfigMap', profiles_name, data={
                   'profiles__smoke__smoke__workspace.yaml': yaml.safe_dump(profile),
                   'profiles__smoke__smoke__providers.yaml': yaml.safe_dump({
@@ -71,7 +76,7 @@ def resources(bom, image, name='installer-smoke', diagnostics=False):
                       'apiVersion': 'saw.redhat.com/v1alpha1', 'kind': 'Sandboxes',
                       'metadata': {}, 'spec': {'sandboxes': []}})})]
     result.append({'apiVersion': 'networking.k8s.io/v1', 'kind': 'NetworkPolicy',
-                   'metadata': {'name': f'{name}-ingress', 'namespace': NAMESPACE},
+                   'metadata': {'name': f'{name}-ingress', 'namespace': namespace},
                    'spec': {'podSelector': {'matchLabels': {'saw.redhat.com/instance': name}}, 'policyTypes': ['Ingress'],
                             'ingress': [{'from': [{'podSelector': {}}]}]}})
     vm = obj('VirtualMachine', name)
@@ -114,10 +119,23 @@ def main():
     parser.add_argument('--installer-bom', type=Path, required=True)
     parser.add_argument('--image', required=True)
     parser.add_argument('--name', default='installer-smoke', help='Unique name for a fresh VM, disk and configuration')
+    parser.add_argument('--namespace', default=NAMESPACE)
     parser.add_argument('--diagnostics', action='store_true', help='Smoke-only safe console diagnostics; never repairs state')
+    parser.add_argument('--bundle-ref', help='Signed release bundle reference, including its immutable digest')
+    parser.add_argument('--bundle-digest', help='Signed release bundle digest')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    manifests = resources(load_installer_bom(args.installer_bom), args.image, args.name, args.diagnostics)
+    bom = load_installer_bom(args.installer_bom)
+    if not args.bundle_ref or not args.bundle_digest:
+        parser.error('--bundle-ref and --bundle-digest are required for a boot smoke')
+    if (not args.bundle_digest.startswith('sha256:') or len(args.bundle_digest) != 71 or
+            any(char not in '0123456789abcdef' for char in args.bundle_digest[7:])):
+        parser.error('--bundle-digest must be sha256 followed by 64 lowercase hexadecimal characters')
+    if '@' not in args.bundle_ref or args.bundle_ref.rsplit('@', 1)[-1] != args.bundle_digest:
+        parser.error('--bundle-ref must be immutable and match --bundle-digest')
+    release = {'name': bom['metadata']['name'], 'bundleRef': args.bundle_ref,
+               'bundleDigest': args.bundle_digest, 'bom': bom}
+    manifests = resources(bom, args.image, args.name, args.diagnostics, release, args.namespace)
     with args.output.open('x') as stream:
         yaml.safe_dump_all(manifests, stream, sort_keys=False)
 

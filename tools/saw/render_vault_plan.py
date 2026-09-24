@@ -29,7 +29,8 @@ def main():
         parser.error("values must define platform.issuer, platform.vault and the named tenant")
     key = identity(platform["issuer"], tenant["subject"], tenant["name"])
     namespace = f"saw-{tenant['name'][:33]}-{key[:24]}"
-    paths = sorted({f"{vault['mount']}/data/{vault['prefix']}/{key}/providers/{item['remoteKey']}" for item in tenant.get("credentials", [])})
+    vault_prefix = tenant.get("vaultPrefix") or f"{vault['prefix'].rstrip('/')}/{tenant['username']}"
+    paths = sorted({f"{vault['mount']}/data/{vault_prefix}/providers/{item['remoteKey']}" for item in tenant.get("credentials", [])})
     if not paths:
         parser.error("tenant.credentials must not be empty")
     print(f"# Tenant: {tenant['name']}\n# Namespace: {namespace}\n# Identity: {key}\n# Review before applying with a Vault administrator identity.\n")

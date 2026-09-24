@@ -40,7 +40,7 @@ def golden_image():
 def profile_inputs():
     selections = [{"profileRef": {"name": "data-science", "configMapRef": {"name": "profiles"}},
                    "credentialBindings": {
-                       "inference-main": {"secretRef": {"name": "saw-provider-nvidia", "key": "api_key"}}}}]
+                       "inference-main": {"secretRef": {"name": "nvidia", "key": "api_key"}}}}]
     docs = {
         "workspace.yaml": {"apiVersion": "saw.redhat.com/v1alpha1", "kind": "Workspace",
                            "metadata": {"name": "default"},

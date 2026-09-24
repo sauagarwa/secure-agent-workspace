@@ -95,8 +95,9 @@ def test_bom_duplicate_keys_are_rejected(installer, bom, tmp_path):
 
 
 def test_guest_refuses_sandbox_profiles_before_partial_apply(installer, bom, snapshot, monkeypatch, capsys):
+    digest = "a" * 64
     snapshot["workspaces"][0]["sandboxes"] = [{"name": "notebook", "type": "generic",
-        "image": "registry.test/image@sha256:" + "a" * 64,
+        "image": "registry.test/image@sha256:" + digest,
         "data": {"name": "notebook", "mountPath": "/sandbox/persist", "retainOnDelete": True}}]
     request = {"version": 1, "revision": {"id": "a" * 32, "snapshot": snapshot}}
     monkeypatch.setattr(installer, "load_installer_bom", lambda path: bom)
@@ -114,6 +115,16 @@ def test_changed_software_bom_cannot_silently_overwrite_running_binaries(install
     monkeypatch.setattr(installer, "load_installer_bom", lambda path: bom)
     with pytest.raises(installer.InstallerError, match="SoftwareUpgradeNotImplemented"):
         installer.validate_guest_release({"installerBOM": desired, "workspaces": []})
+
+
+def test_installer_logic_version_can_advance_with_same_image_payload(installer, bom, monkeypatch):
+    installed = deepcopy(bom)
+    installed["spec"]["installerVersion"] = "0.1.0"
+    monkeypatch.setattr(installer, "load_installer_bom", lambda path: installed)
+    monkeypatch.setattr(installer, "verify_installed_software", lambda release: None)
+    snapshot = {"installerBOM": bom, "workspaces": [], "enrollmentIdentity": "a" * 64,
+                "ownerSubject": "owner"}
+    assert installer.validate_guest_release(snapshot) == bom
 
 
 def test_bad_request_errors_are_public_safe(installer, monkeypatch, capsys):

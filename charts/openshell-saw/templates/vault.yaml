@@ -4,10 +4,12 @@ kind: ServiceAccount
 metadata: {name: saw-vault-reader, namespace: {{ $ns }}}
 automountServiceAccountToken: false
 ---
+{{- if $vault.caBundle }}
 apiVersion: v1
 kind: ConfigMap
 metadata: {name: vault-ca, namespace: {{ $ns }}}
-data: {ca.crt: {{ required "openshellSaw.platform.vault.caBundle is required" $vault.caBundle | quote }} }
+data: {ca.crt: {{ $vault.caBundle | quote }} }
+{{- end }}
 ---
 apiVersion: external-secrets.io/v1
 kind: SecretStore
@@ -18,6 +20,8 @@ spec:
       server: {{ required "openshellSaw.platform.vault.server is required" $vault.server | quote }}
       path: {{ required "openshellSaw.platform.vault.mount is required" $vault.mount | quote }}
       version: v2
+      {{- if $vault.caBundle }}
       caProvider: {type: ConfigMap, name: vault-ca, key: ca.crt}
+      {{- end }}
       auth: {kubernetes: {mountPath: {{ required "openshellSaw.platform.vault.authMount is required" $vault.authMount | quote }}, role: {{ $ns | quote }}, serviceAccountRef: {name: saw-vault-reader, audiences: [{{ required "openshellSaw.platform.vault.audience is required" $vault.audience | quote }}]}}}
 {{- end }}

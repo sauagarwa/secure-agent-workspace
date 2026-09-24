@@ -37,4 +37,5 @@ print(yaml.safe_load(open(sys.argv[1]))['openshellSaw']['tenant']['name'])
 PY
 )"
 bash tools/saw/platform_preflight.sh
-helm upgrade --install "saw-$name" charts/openshell-saw --namespace "$namespace" --create-namespace -f "$tmp"
+helm upgrade --install "saw-$name" charts/openshell-saw --namespace "$namespace" --create-namespace \
+  --set openshellSaw.createNamespace=false -f "$tmp"

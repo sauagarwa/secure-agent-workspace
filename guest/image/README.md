@@ -1,38 +1,51 @@
 # Installer image build and first-boot qualification
 
 This build uses a clean Fedora 44 cloud disk, verified against the published
-SHA-256, and a digest-pinned Fedora builder. The three OpenShell payloads come
-from the selected InstallerBOM. It does not modify or copy a tenant-used disk.
-The image includes rootless Podman, Python/PyYAML, QEMU guest agent and the paired
-guest/installer bundle. Binary versions are checked inside the disk before sealing.
+SHA-256, and a digest-pinned Fedora builder. The image contains the guest service,
+rootless Podman, Python/PyYAML, QEMU guest agent and the signed-release verifier;
+it does not contain OpenShell payloads or apply_bom.py. Those are delivered by the
+platform-selected OCI release bundle. It does not modify or copy a tenant-used disk.
 
 The image has no enrollment, provider credentials, gateway PKI or reconciliation
 journal. cloud-user is locked, has no supplementary groups or cloud-init sudo
 grant, and receives subordinate IDs for rootless Podman. Rootful Podman services
 are disabled. The cloud-init enrollment enables the guest; no SSH setup is needed.
 
+For an isolated diagnostic image only, add `SAW_IMAGE_ENABLE_SSH=1` to
+`make saw-image-context`. This installs and enables `sshd` in that image so a
+temporary test key can be used for guest inspection. Do not use that variant as
+the production golden image.
+
 Generate a new context (the target must not exist):
 
 ```sh
 make saw-image-context SAW_INSTALLER_BOM=examples/saw/installer-bom.yaml \
-  SAW_IMAGE_CONTEXT=/new/path/saw-image-context
+  SAW_IMAGE_CONTEXT=/new/path/saw-image-context \
+  SAW_RELEASE_PUBLIC_KEY=/path/to/release-signing-public-key.pem
 ```
 
-For an explicitly authorized isolated OpenShift qualification:
+For an explicitly authorized isolated OpenShift qualification, keep the build
+namespace disposable and pass it to the existing image-build command:
 
 ```sh
-oc create -f examples/saw/installer-build.yaml
-oc start-build saw-installer -n saw-installer-validation --from-dir=/new/path/saw-image-context
-oc logs -n saw-installer-validation -f build/saw-installer-1
+make saw-image-build SAW_IMAGE_CONTEXT=/new/path/saw-image-context \
+  SAW_IMAGE_BUILD_NAMESPACE=saw-installer-validation
 ```
 
-After a successful build, obtain its `status.output.to.imageDigest` and the
-ImageStream's internal repository. Render a fresh smoke manifest with that digest:
+Build and publish the signed release bundle separately with
+`tools/saw/build_release_bundle.py`, then obtain its immutable digest. After a
+successful guest-image build, obtain its `status.output.to.imageDigest` and the
+ImageStream's repository. Build and publish the signed release bundle separately
+with `tools/saw/build_release_bundle.py`, then render a fresh smoke manifest with
+both immutable digests:
 
 ```sh
 python3 tools/saw/render_boot_smoke.py --installer-bom examples/saw/installer-bom.yaml \
+  --namespace saw-installer-validation \
   --name installer-smoke-run1 \
   --image REGISTRY/saw-installer-validation/saw-installer@sha256:DIGEST \
+  --bundle-ref REGISTRY/saw-release@sha256:BUNDLE_DIGEST \
+  --bundle-digest sha256:BUNDLE_DIGEST \
   --output /new/path/saw-boot-smoke.yaml
 oc create --dry-run=server -f /new/path/saw-boot-smoke.yaml
 oc create -f /new/path/saw-boot-smoke.yaml

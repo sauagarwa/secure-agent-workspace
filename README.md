@@ -21,9 +21,10 @@ Deploy isolated, per-user AI workspaces on OpenShift Virtualization with GitOps-
     - [Prerequisites](#prerequisites)
     - [Installation](#installation)
       - [Option A: Validated Pattern (GitOps multi-user)](#option-a-validated-pattern-gitops-multi-user)
-      - [Option B: Standalone Helm (no Argo CD)](#option-b-standalone-helm-no-argo-cd)
+      - [Option B: Standalone Helm (one user at a time)](#option-b-standalone-helm-one-user-at-a-time)
     - [Global installer release](#global-installer-release)
     - [Per-user instances](#per-user-instances)
+      - [Creating and managing users and Vault paths](#creating-and-managing-users-and-vault-paths)
     - [Supported inference providers](#supported-inference-providers)
     - [Validate tenant provisioning](#validate-tenant-provisioning)
     - [Delete](#delete)
@@ -50,7 +51,14 @@ root disk, Vault authorization, ESO-managed provider Secrets, and optional VM ar
 all derived from reviewed Git configuration. The VM receives only explicitly
 projected, read-only inputs; it does not receive Kubernetes API credentials.
 
-The system supports multiple inference providers (Gemini, Anthropic, OpenAI, NVIDIA Build, OpenRouter, Ollama, or custom endpoints) and optional web search integration (Tavily, Brave). A bootc-based golden image pipeline pre-bakes all packages into a container image that CDI imports directly, enabling fast VM provisioning without cloud-init package installation.
+The current guest reconciler supports NVIDIA, OpenAI, and Anthropic single-key
+credentials in newly owned workspaces. Other providers, web search, sandbox
+lifecycle, and full workspace readiness remain unimplemented or unqualified.
+The image pipeline customizes a pinned Fedora Cloud QCOW2 with the guest service,
+rootless Podman, and the release-verification key, then publishes the disk in an
+OCI image for CDI import. A separate signed OCI release bundle supplies the
+versioned installer and pinned OpenShell payloads at guest startup; cloud-init
+does not install packages.
 
 ### Architecture diagrams
 
@@ -88,17 +96,17 @@ The following diagrams are from the [NVIDIA Secure Agent Workspace OpenShift Vir
 │       │ secrets sync                 │ JWKS validation   │
 │       ▼                              ▼                   │
 │  ┌──────────────────────────────────────────┐            │
-│  │ Golden Image (bootc)                     │            │
-│  │ Fedora 44 + OpenShell + podman + nodejs  │            │
-│  │ Built via BuildConfig → CDI DataSource   │            │
+│  │ Golden VM disk (QCOW2 in OCI)            │            │
+│  │ Fedora 44 + guest service + Podman       │            │
+│  │ CDI imports approved disk DataSource     │            │
 │  └─────────────────┬────────────────────────┘            │
 │                    │ clone per user                      │
 │       ┌────────────┼────────────┐                        │
 │       ▼            ▼            ▼                        │
 │  ┌─────────┐ ┌─────────┐ ┌─────────┐                     │
 │  │ alice   │ │ bob     │ │ carol   │  Per-user VMs       │
-│  │ sandbox │ │ sandbox │ │ sandbox │  with gateway +     │
-│  │  VM     │ │  VM     │ │  VM     │  agent + routes     │
+│  │ guest   │ │ guest   │ │ guest   │  pulls signed       │
+│  │  VM     │ │  VM     │ │  VM     │  OpenShell bundle   │
 │  └─────────┘ └─────────┘ └─────────┘                     │
 │       │            │            │                        │
 │       └────────────┼────────────┘                        │
@@ -151,9 +159,37 @@ remains a qualification gate for the current guest implementation.
 
 ### Prerequisites
 
-You need an OpenShift administrator account for the platform steps and a Vault
-administrator account for the policy step. Nothing below asks you to put a Vault
-administrator token, provider API key, or mutable image tag in Git.
+Complete these prerequisites before starting either deployment option:
+
+- An OpenShift 4.22+ cluster and an administrator account for platform setup.
+- A Vault administrator for the tenant policy and Kubernetes-auth role setup.
+- `oc`, Helm 3, Python 3, Mike Farah `yq`, and the repository tools installed.
+- OpenShift Virtualization/CDI and External Secrets Operator APIs available.
+- A configured OIDC issuer (bundled Keycloak or an external provider) and a
+  Vault Kubernetes-auth role/ESO store for each tenant.
+- Before enabling a tenant VM, an approved CDI `DataSource`, an immutable
+  golden-image digest, and an approved signed installer bundle with its
+  InstallerBOM and SHA-256 digests.
+- The golden image must be publicly pullable for the documented boot smoke
+  renderer, which currently has no registry-secret option. CDI import can use a
+  pull Secret in `saw-images` for a private image.
+- The signed installer bundle must be publicly pullable from the guest. The
+  current rootless Podman bootstrap does not yet install private registry
+  credentials.
+- A storage class that lets CDI bind the tenant root disk before the VM is
+  scheduled. If the cluster default uses `WaitForFirstConsumer` and the disk
+  remains pending, set an immediately binding class on the image: use
+  `sawBlueprint.goldenImages[].storageClass` for GitOps or
+  `sawPlatform.image.storageClassName` for standalone Helm.
+- Guest egress to cluster DNS and HTTPS registries. The tenant NetworkPolicy
+  allows DNS on UDP/TCP 53 and OpenShift DNS on UDP/TCP 5353, plus HTTPS on 443.
+
+The steps below begin with the shared cluster login and preflight. Complete
+them once, then follow **Option A or Option B** below. Do not mix both tenant
+provisioning paths for the same tenant.
+
+Never commit a Vault administrator token, provider API key, or mutable image tag
+to Git.
 
 Install the repository tools and log in first:
 
@@ -199,8 +235,8 @@ confidential `saw` OIDC client, and stores its generated client secret as
 credentials from the operator-generated Secret, or explicit
 `KEYCLOAK_ADMIN_USER` and `KEYCLOAK_ADMIN_PASSWORD` values.
 
-The bundled Keycloak default namespace is `keycloak`. If the RHBK operator is
-or an existing `openshell-keycloak` instance is found in another namespace, the
+The bundled Keycloak default namespace is `keycloak`. If the RHBK operator or an
+existing `openshell-keycloak` instance is found in another namespace, the
 command asks before using it; set
 `KEYCLOAK_AUTO_NS=1` for a non-interactive deployment or pass
 `KEYCLOAK_NS=<namespace>` explicitly. If multiple Keycloak resources exist,
@@ -216,23 +252,24 @@ SAW_REQUIRE_KEYCLOAK=1 make saw-platform-check
 ```
 
 Vault/ESO setup is owned by this repository. Run `make setup-vault` to install
-the SAW OperatorHub dependencies and validate Vault/ESO connectivity, then use
-`make configure-vault` with a reviewed user file to render the tenant policy and
-role plan for the Vault administrator. If Vault already exists, discovery reads
+the SAW OperatorHub dependencies and validate Vault/ESO connectivity. Each
+tenant flow renders its Vault policy and Kubernetes-auth role plan for an
+administrator to review before deployment. `configure-vault-user` validates or
+publishes provider records separately. If Vault already exists, discovery reads
 the existing `vault-backend` ClusterSecretStore. These commands never place a
 Vault administrator token or provider credential in Git.
 
 ### Installation
 
-Two deployment flows are available:
+Two deployment options are available after completing the shared prerequisites:
 
-1. **Flow 1 — Validated Pattern / GitOps (multi-user):** reviewed tenant
+1. **Option A — Validated Pattern / GitOps (multi-user):** reviewed tenant
    records in Git are reconciled through Argo CD/ApplicationSet.
-2. **Flow 2 — Standalone Helm (one user at a time):** an administrator sets
+2. **Option B — Standalone Helm (one user at a time):** an administrator sets
    the shared platform defaults once, then each user supplies one small
    `sawUser` YAML file and runs `make saw-user-install`.
 
-#### **Flow 1 — Validated Pattern / GitOps (multi-user)**
+#### Option A: Validated Pattern (GitOps multi-user)
 
 This repository's deployment path is the tenant blueprint. Do **not** use
 `make copy-images`, `values-secret.yaml`, or `make openshell-saw-create` for this
@@ -240,10 +277,14 @@ path: they belong to the legacy direct-provisioning flow and mirror legacy
 0.0.103 images. Tenant workspaces instead use a qualified VM disk built from a
 digest-pinned InstallerBOM.
 
-> **Current release status:** the chart wiring and tenant isolation contracts are
-> implemented, but the guest installer is not yet an end-to-end qualified production
-> release. Keep the blueprint disabled and guest VMs `Halted` until image, Vault/ESO,
-> runtime, and workspace-readiness qualification is complete. See
+> **Current release status:** a disposable end-to-end run built and imported a
+> candidate image, cloned it into a tenant VM, and booted the VM on 2026-09-24.
+> The guest `/readyz` endpoint still returned `503`, so guest reconciliation and
+> workspace readiness are not qualified. The current installer also rejects
+> enabled sandbox profiles before mutation; the bundled `data-science` example
+> cannot converge until that feature is implemented. Do not promote this
+> candidate or enable production VMs until image, Vault/ESO, runtime, and
+> readiness qualification is complete. See
 > [implementation status](docs/saw-blueprint-implementation.md).
 
 The deployment owner is Argo CD:
@@ -259,21 +300,22 @@ Reviewed tenant records in Git
 
 Follow these steps in order for a new environment.
 
-1. Check the cluster services.
+1. Confirm the common platform check passes and require Argo CD for this option.
 
    ```bash
-   make saw-platform-check
+   SAW_REQUIRE_ARGO=1 make saw-platform-check
    ```
 
-   This checks the APIs only; it makes no changes. Install any missing required
-   operator before proceeding. For GitOps mode, verify Argo explicitly with
-   `SAW_REQUIRE_ARGO=1 make saw-platform-check`.
+   The preflight is read-only. Install any missing required operator before
+   proceeding.
 
 2. Choose the release BOM. An **InstallerBOM** is the versioned release record
    for the three OpenShell images installed in the guest: CLI, gateway, and
    supervisor. It pins every image by SHA-256 digest, so a later registry tag
    change cannot alter a workspace. Start with
-   [examples/saw/installer-bom.yaml](/Users/saurabh/dev/ai/nvidia/openshell/secure-agent-workspace/examples/saw/installer-bom.yaml), copy it into your release repository, review its image digests, and give it a release name. The example is a reference, not a production approval.
+   [`examples/saw/installer-bom.yaml`](examples/saw/installer-bom.yaml), copy it
+   into your release repository, review its image digests, and give it a release
+   name. The example is a reference, not a production approval.
 
 3. Build the immutable VM disk from that BOM.
 
@@ -283,33 +325,62 @@ Follow these steps in order for a new environment.
 
    make saw-image-context \
      SAW_INSTALLER_BOM=/tmp/saw-release/installer-bom.yaml \
-     SAW_IMAGE_CONTEXT=/tmp/saw-release/image-context
+     SAW_IMAGE_CONTEXT=/tmp/saw-release/image-context \
+     SAW_RELEASE_PUBLIC_KEY=/path/to/release-signing-public-key.pem
 
-   make saw-image-build SAW_IMAGE_CONTEXT=/tmp/saw-release/image-context
+   make saw-image-build \
+     SAW_IMAGE_CONTEXT=/tmp/saw-release/image-context \
+     SAW_IMAGE_BUILD_NAMESPACE=saw-installer-validation
    ```
 
-   `saw-image-context` only prepares the allowlisted build files. `saw-image-build`
-   creates/uses the isolated `saw-installer-validation` BuildConfig and starts a
-   binary build. It prints the candidate immutable `repository@sha256:digest`.
+   `saw-image-context` only prepares the allowlisted build files. Add
+   `SAW_IMAGE_ENABLE_SSH=1` only for a disposable diagnostic image; the default
+   image remains SSH-free. `saw-image-build`
+   creates/uses the isolated BuildConfig in `SAW_IMAGE_BUILD_NAMESPACE` and starts
+   a binary build. It prints the candidate immutable `repository@sha256:digest`.
    Do not use that image for tenants yet.
 
-   The same build can be started from GitHub Actions with the manually triggered
+   Build the signed release bundle separately. It contains the selected
+   `apply_bom.py`, InstallerBOM and OpenShell payloads; the VM image contains
+   only the verifier and bootstrap:
+
+   ```bash
+   python3 tools/saw/build_release_bundle.py \
+     --installer-bom /tmp/saw-release/installer-bom.yaml \
+     --name saw-example-2026-09 \
+     --signing-key /path/to/release-signing-key.pem \
+     --output /tmp/saw-release/bundle-context
+   ```
+
+   Publish that context as an immutable OCI image and record both its
+   `bundleRef` and `bundleDigest`. The current guest bootstrap uses unauthenticated
+   rootless Podman, so the bundle image must be publicly pullable from the guest.
+
+   Configure the `saw-golden-image` GitHub environment with
+   `SAW_RELEASE_PUBLIC_KEY`, containing the PEM public key paired with the
+   release signing key. The manually triggered
    [`Build SAW golden VM image`](.github/workflows/build-saw-golden-image.yml)
-   workflow. The workflow builds the OCI golden-image artifact directly on the
-   GitHub runner and pushes it to GHCR using the workflow's `GITHUB_TOKEN`; it
-   does not require OpenShift credentials. Configure the repository or
-   environment package-write permission, then provide the release name and BOM
-   path when dispatching the workflow. It uploads the immutable GHCR image
-   reference and build inputs as an artifact; it deliberately stops before
-   promotion and CDI `DataSource` creation so the image can complete the
-   smoke, scan, signature, and approval gates first.
+   workflow builds a production image and a separate `-ssh` diagnostic image
+   directly on the GitHub runner, then pushes both to GHCR using the workflow's
+   `GITHUB_TOKEN`. Only the SSH-free production image can enter qualification
+   and promotion; never use the diagnostic image for tenant VMs. The workflow
+   does not require OpenShift credentials. Configure package-write permission,
+   then provide the release name and BOM path when dispatching it. It uploads
+   immutable image references and build inputs, and stops before promotion and
+   CDI `DataSource` creation so each image can complete its smoke, scan,
+   signature, and approval gates. Make the production golden-image package
+   public before running the smoke renderer; a private CDI import instead needs
+   a pull Secret in `saw-images` and `registrySecret` in the image definition.
 
 4. Render and run the disposable boot smoke test.
 
    ```bash
    make saw-image-smoke-render \
      SAW_INSTALLER_BOM=/tmp/saw-release/installer-bom.yaml \
+     SAW_SMOKE_NAMESPACE=saw-installer-validation \
      SAW_SMOKE_IMAGE=<repository@sha256:digest-printed-by-the-build> \
+     SAW_SMOKE_BUNDLE_REF=<bundle-repository@sha256:bundle-digest> \
+     SAW_SMOKE_BUNDLE_DIGEST=sha256:<bundle-digest> \
      SAW_SMOKE_OUTPUT=/tmp/saw-release/boot-smoke.yaml
 
    oc create --dry-run=server -f /tmp/saw-release/boot-smoke.yaml
@@ -317,22 +388,45 @@ Follow these steps in order for a new environment.
    oc get vm,vmi,dv,pvc -n saw-installer-validation
    ```
 
+   This disposable renderer creates exactly one VM per invocation. Use a fresh
+   name for each retry; do not create multiple VMs as a substitute for the
+   documented one-workspace tenant test.
+
    Complete your organization’s scan, signature, and approval gates. Then place
    the approved disk digest in `sawBlueprint.goldenImages[].registryURL` and copy
    the BOM’s `spec` into `sawBlueprint.installer.releases[].bom` as shown below.
    [Guest image qualification](guest/image/README.md) explains the expected
    smoke evidence and failure diagnosis.
 
+   For a manual deployment, import the image only after those gates pass:
+
+   ```bash
+   # First edit examples/saw/golden-image.yaml with the approved image digest.
+   make setup-golden-image
+   oc get dv,datasource -n saw-images -w
+   ```
+
+   This uses `examples/saw/golden-image.yaml` and does not run the legacy
+   `copy-images` target, which mirrors multiple tagged runtime images into the
+   internal registry. After the DataVolume succeeds, rerun
+   `make saw-platform-discover` to record the generated CDI `DataSource` in
+   `config/saw-platform.yaml`.
+
 The repository includes a release workflow at
 `.github/workflows/publish-saw-installer.yml`. Create a tag in the form
-`saw-installer-<release-name>` (for example, `saw-installer-saw-2026-09`), or run the workflow from
-the Actions tab with an explicit BOM path. The workflow validates the BOM,
-builds the deterministic guest bundle, and publishes the bundle plus BOM as an
-immutable OCI artifact in GHCR:
+`saw-installer-<release-name>` (for example, `saw-installer-saw-example-2026-09`), or run the workflow from
+the Actions tab with an explicit BOM path. Configure the `saw-golden-image`
+GitHub environment secret `SAW_RELEASE_SIGNING_KEY` with the matching private
+key. The workflow validates the BOM, signs the release manifest, builds an OCI
+image containing the installer, BOM, and pinned OpenShell payloads, then pushes
+it to GHCR. The image is pullable by the guest with rootless Podman:
 
 ```text
 ghcr.io/<organization>/saw-installer@sha256:<artifact-digest>
 ```
+
+Set the published installer package visibility to public so the guest can pull
+it without registry credentials.
 
 The workflow summary and downloadable artifact contain `bundleRef` and
 `bundleDigest`. Copy those values, along with the BOM content, into
@@ -389,20 +483,20 @@ mutable release tag as `bundleRef`.
    Argo creates the tenant namespace, DataVolume, ESO resources, and optional VM.
    ESO creates the provider Secret only after Vault authentication succeeds.
 
-#### **Flow 2 — Standalone Helm (one user at a time)**
+#### Option B: Standalone Helm (one user at a time)
 
 Use this for a disposable test or a cluster where Argo CD is intentionally not
 installed. The manual flow keeps its local platform contract outside the
 checked-in `overrides` directory. Follow the complete sequence below; create
 and publish the shared platform ConfigMap only after identity and Vault setup.
+It also requires the approved golden-image `DataSource` and publicly pullable
+signed release bundle listed in the shared prerequisites.
 
 The standalone sequence is:
 
-1. Log in and validate the required APIs:
+1. If you installed operators after the shared preflight, verify the APIs again:
 
    ```bash
-   oc login <cluster-api>
-   oc whoami
    make saw-platform-check
    ```
 
@@ -429,16 +523,14 @@ The standalone sequence is:
 
    `setup-vault` installs/checks the SAW ESO prerequisites and deploys only a
    standalone Vault release plus `ClusterSecretStore/vault-backend` when they are
-   absent. It never runs `pattern.sh` or deploys the full application in Flow 2.
+   absent. It never runs `pattern.sh` or deploys the full application in Option B.
    The standalone Vault uses the chart's development mode and is suitable for
    evaluation: the Vault namespace is created automatically and Vault is
    initialized/unsealed automatically. It has no production seal/unseal or
    durable-storage workflow; use an approved production Vault configuration for
    production.
-   `configure-vault` renders the
-   tenant-scoped policy and Kubernetes-auth role plan for administrator review;
-   it does not copy provider credentials into Git. An existing
-   `vault-backend` ClusterSecretStore is reused.
+   An existing `vault-backend` ClusterSecretStore is reused. The per-user Vault
+   policy and Kubernetes-auth role plan is rendered after the user file is ready.
 4. Copy `config/saw-platform.yaml.example` to the ignored local
    `config/saw-platform.yaml`, discover safe values, and review the result:
 
@@ -471,7 +563,7 @@ The standalone sequence is:
        dataSource: qualified-saw-release-2026-09
        diskSizeGi: 40
      installerRelease:
-       name: saw-2026-09
+       name: saw-example-2026-09
        bundleRef: registry.example.com/saw-installer@sha256:<64-hex-digest>
        bundleDigest: sha256:<64-hex-digest>
        bom:
@@ -488,18 +580,50 @@ The standalone sequence is:
    `bundleDigest` come from the immutable installer bundle published for that
    release. Do not use a mutable tag or the golden VM image digest in these
    fields; the golden VM digest belongs to the CDI import/DataSource.
-5. Create or edit one `sawUser` file per user. Set the immutable OIDC subject,
-   username, `instance.workspaces`, profile ConfigMaps/credential bindings, and
-   guest sizing/settings.
-6. Render the Vault policy plan:
+5. Create one admin-owned user enrollment file under `config/users/`:
 
    ```bash
-   make configure-vault SAW_USER_VALUES=overrides/users/<username>.yaml
+   make create-user USERNAME=alice PROFILES=data-science
    ```
 
-   Have the Vault administrator review and apply the printed policy and
-   Kubernetes-auth role commands before the tenant is installed.
-7. Publish the reviewed shared configuration once:
+   This creates `config/users/alice/user.yaml` and a local-only
+   `config/users/alice/secret.yaml` with default guest/profile settings. Set its
+   immutable OIDC `subject` before rendering. The profile list is required. For
+   bundled Keycloak, run `make configure-keycloak-user SAW_USER=<username>` to
+   create the account or confirm it is enabled, grant `openshell-user`, and record its
+   immutable subject. Set the user's password through your approved Keycloak
+   enrollment process. Set `KEYCLOAK_CA_BUNDLE` when the Keycloak route uses a
+   private CA. For an external OIDC provider, the administrator must
+   supply the subject. Provider records belong only in `secret.yaml`; that file
+   is ignored by Git.
+   The tracked templates are [`config/users.example.yaml`](config/users.example.yaml)
+   and [`config/secrets.example.yaml`](config/secrets.example.yaml).
+
+6. Edit the user file as needed. Set the username, declared credential names
+   and keys, profile ConfigMaps and bindings, and guest sizing/settings. Preview
+   the resulting values:
+
+   ```bash
+   make saw-user-values SAW_USER=<username>
+   ```
+
+   The bundled `data-science` profile includes an enabled sandbox, which the
+   current guest installer rejects before mutation. It will not reach Ready
+   until sandbox support is implemented and qualified.
+7. Fill the complete local provider records in
+   `config/users/<username>/secret.yaml`. Render the per-user Vault policy and
+   Kubernetes-auth role plan, have the Vault administrator review and apply it,
+   then validate/publish the provider records:
+
+   ```bash
+   make configure-vault-plan SAW_USER=<username>
+   make configure-vault-user SAW_USER=<username>
+   ```
+
+   This is a dry run by default. Set `VAULT_APPLY=1` with a Vault
+   administrator token to write records. Use `make configure-vault` to validate
+   or publish provider records for all local users.
+8. Publish the reviewed shared configuration once:
 
    ```bash
    make saw-platform-configmap
@@ -507,32 +631,24 @@ The standalone sequence is:
 
    This creates `ConfigMap/saw-platform-config` in `saw-system`. It is shared and
    is not recreated in every user namespace.
-8. Preview the generated tenant values:
+9. Preview the generated tenant values:
 
    ```bash
-   make saw-user-values SAW_USER_VALUES=overrides/users/<username>.yaml
+   make saw-user-values SAW_USER=<username>
    ```
 
-9. Create the user’s isolated SAW namespace and workspace:
+10. Create the user’s isolated SAW namespace and workspace:
 
    ```bash
-   make saw-user-install SAW_USER_VALUES=overrides/users/<username>.yaml
+   make saw-user-install SAW_USER=<username>
    ```
 
-10. Verify the resulting resources:
+11. Verify the resulting resources:
 
    ```bash
    helm list -A | grep saw-
    oc get vm,vmi,dv,pvc,secretstore,externalsecret -A
    ```
-
-```bash
-# Preview exactly what the per-user chart will receive.
-make saw-user-values SAW_USER_VALUES=overrides/users/research.yaml
-
-# Create/update only this tenant namespace and its VM resources.
-make saw-user-install SAW_USER_VALUES=overrides/users/research.yaml
-```
 
 `saw-platform-discover` can fill the Keycloak issuer, Vault server and CA bundle,
 and an unambiguous CDI `DataSource`. It leaves values empty when the cluster
@@ -566,15 +682,18 @@ Each tenant chart writes a namespace-local copy of the release ConfigMap because
 Kubernetes does not allow a VM to mount a ConfigMap from another namespace.
 
 The ConfigMap carries the installer bundle reference/digest and InstallerBOM. The
-guest currently executes the image-owned installer and consumes the release BOM;
-verified activation of a separately fetched bundle is the next guest-runtime gate.
+image-owned bootstrap pulls the bundle with rootless Podman, stages it in a
+writable directory under `/var/lib/saw`, verifies its signature and file digests,
+then atomically installs it under `/var/lib/saw/releases/<digest>`. It executes
+the `/var/lib/saw/releases/current/apply_bom.py` entrypoint only after verification.
 
 ### Per-user instances
 
 The tenant blueprint is the multi-user deployment path. A reviewed Git record
 creates one Argo CD Application and one deterministic namespace for each unique
 `(OIDC issuer, immutable subject, SAW name)` tuple. The username is display
-metadata only: changing it does not transfer a namespace or a Vault path.
+metadata and the default Vault-prefix suffix; changing it does not transfer a
+namespace or change an explicitly configured Vault prefix.
 
 The flow is:
 
@@ -583,9 +702,65 @@ Reviewed plain tenant values in Git
   -> parent Argo application / ApplicationSet
   -> one tenant Argo application and namespace
   -> tenant root DataVolume cloned from saw-images
-  -> ESO provider Secrets in that tenant namespace
+  -> one ESO provider Secret per selected provider in that tenant namespace
   -> optional VM mounts reviewed ConfigMaps and provider Secrets read-only
 ```
+
+#### Creating and managing users and Vault paths
+
+Create one enrollment for each `(OIDC issuer, immutable subject, SAW name)` tuple.
+In GitOps mode, add the user to `sawBlueprint.tenants` in the reviewed blueprint.
+Set `name`, `subject`, and a lowercase Kubernetes-safe `username`; use the
+identity provider's immutable subject (the Keycloak user UUID for bundled
+Keycloak). Create bundled-Keycloak accounts
+through the approved identity administration process, assign the `openshell-user`
+realm role, and record the UUID in Git. For an external identity provider, the
+identity administrator supplies its immutable `sub`. In standalone mode,
+`make create-user USERNAME=alice PROFILES=data-science` creates a local enrollment
+and secret file; `make configure-keycloak-user SAW_USER=alice` can create or verify
+the bundled-Keycloak account and write its UUID into that enrollment. Passwords
+are set through the identity provider's enrollment process, never stored in SAW
+configuration.
+
+Git enrollment contains only identity, selected profiles, provider names, and
+allowed field names. Provider values stay in Vault. Give each user a distinct
+`vaultPrefix`; for example, `saw/engineering/alice`. If omitted, the tenant chart
+uses `<platform Vault prefix>/<username>`. The standalone `create-user` helper
+starts with `saw/<username>`; administrators can change it in `user.yaml` to use
+another path. The KV v2 record for a provider is:
+
+```text
+<mount>/<vaultPrefix>/providers/<remoteKey>
+```
+
+For example, mount `secret`, prefix `saw/engineering/alice`, and provider key
+`nvidia` resolve to `secret/data/saw/engineering/alice/providers/nvidia` in a
+Vault policy and `saw/engineering/alice/providers/nvidia` in `vault kv` and ESO
+configuration. Store the provider's related fields together in that record. The
+tenant enrollment declares the allowed fields under `credentials[].keys`; ESO
+projects only those fields into a namespace-local Secret named for `remoteKey`.
+Workspace credential bindings select which Secret keys the VM receives as
+read-only inputs. A different user gets a different prefix, policy, namespace,
+and Secret even when both users select the same provider.
+
+To add a GitOps user, render and have the Vault administrator apply the policy
+and Kubernetes-auth role for the new enrollment before enabling its tenant, then
+commit the reviewed tenant record. To add a standalone user, fill the generated
+local `config/users/<username>/secret.yaml`, review
+`make configure-vault-plan SAW_USER=<username>`, apply the resulting role with a
+Vault administrator identity, then run
+`make configure-vault-user SAW_USER=<username>`. That command validates records by default; `VAULT_APPLY=1`
+publishes them to Vault. Never commit the local secret file, Vault tokens, or
+provider values.
+
+Manage workspace intent and allowed credential bindings through reviewed Git
+changes. Rotate provider values in Vault with `make configure-vault-user` for a
+standalone enrollment (or the approved Vault process for GitOps), then allow ESO
+to refresh its tenant Secret. Revoke the old value at the provider as well.
+Offboarding is separate from identity disablement: disable the IdP account,
+remove or revoke its Vault role and records, and follow the approved tenant data
+retention and teardown process. Removing a Git entry alone is not a data-erasure
+operation because tenant resources use no-prune and retention protections.
 
 Create one `tenants` item for each user/SAW tuple in the Git-tracked
 `overrides/saw-blueprint.yaml` (or a reviewed environment-specific value file).
@@ -624,9 +799,9 @@ sawBlueprint:
     project: default
     tenantChartPath: charts/openshell-saw
   installer:
-    defaultRelease: saw-2026-09
+    defaultRelease: saw-example-2026-09
     releases:
-      - name: saw-2026-09
+      - name: saw-example-2026-09
         bundleRef: registry.example.com/saw-installer@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         bundleDigest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
         bom:
@@ -644,10 +819,11 @@ sawBlueprint:
       name: research
       subject: immutable-oidc-subject
       username: alice
+      vaultPrefix: saw/alice
       credentials:
-        - name: inference-main
-          remoteKey: inference-main
-          properties: {api_key: api_key}
+        - name: nvidia
+          remoteKey: nvidia
+          keys: [type, model, endpoint, api_key]
       # Instance intent, profiles, and optional VM configuration are reviewed
       # Git data. Never put provider values here.
       profileConfigMaps:
@@ -661,7 +837,7 @@ sawBlueprint:
             profiles__data-science__default__providers.yaml: |-
               apiVersion: saw.redhat.com/v1alpha1
               kind: Providers
-              metadata: {profile: data-science}
+              metadata: {name: default, profile: data-science}
               spec:
                 providers:
                   - name: nvidia
@@ -672,10 +848,10 @@ sawBlueprint:
           - profileRef: {name: data-science, configMapRef: {name: alice-profiles}}
             credentialBindings:
               inference-main:
-                secretRef: {name: saw-provider-inference-main, key: api_key}
+                secretRef: {name: nvidia, key: api_key}
       # Omit this to inherit installer.defaultRelease. Set it only for an
       # approved canary or exceptional tenant release.
-      installerReleaseRef: saw-2026-09
+      installerReleaseRef: saw-example-2026-09
       guest:
         enabled: true
         cores: 4
@@ -715,6 +891,12 @@ Do not manually create tenant namespaces, VMs, DataVolumes, or provider Secrets:
 Argo owns desired Kubernetes resources and ESO owns Secret contents. To change a
 profile or instance, change that tenant's reviewed Git values; the VM receives the
 allowlisted projected inputs without a Kubernetes API token.
+
+Provider credentials are user-scoped. Set `vaultPrefix: saw/alice` (or let the
+standalone renderer derive `saw/<username>` from the platform prefix). ESO reads
+`saw/alice/providers/nvidia` and creates `Secret/nvidia` in Alice's isolated
+namespace. Profile bindings select which provider Secrets the VM mounts; they do
+not create a shared profile Secret.
 
 Use the disposable live-cluster isolation gate after onboarding two tenants:
 

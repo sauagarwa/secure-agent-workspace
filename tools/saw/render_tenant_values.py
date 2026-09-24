@@ -33,10 +33,15 @@ def main():
     release = next((item for item in cfg.get("installer", {}).get("releases", []) if item.get("name") == release_name), None)
     if not release:
         parser.error("tenant installerReleaseRef/defaultRelease must name one installer release")
+    tenant_image = {"namespace": cfg.get("imageNamespace"),
+                    "dataSource": f"{image['name'][:25]}-{helm_hash(image)[:24]}",
+                    "diskSizeGi": image["diskSizeGi"]}
+    if image.get("storageClass"):
+        tenant_image["storageClassName"] = image["storageClass"]
     resolved = {
         "platform": platform,
         "tenant": tenant,
-        "image": {"namespace": cfg.get("imageNamespace"), "dataSource": f"{image['name'][:25]}-{helm_hash(image)[:24]}", "diskSizeGi": image["diskSizeGi"]},
+        "image": tenant_image,
         "instance": tenant["instance"],
         "profileConfigMaps": tenant.get("profileConfigMaps", []),
         "installerRelease": release,

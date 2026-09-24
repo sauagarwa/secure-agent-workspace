@@ -7,5 +7,10 @@ metadata:
   annotations: {argocd.argoproj.io/sync-options: Prune=false,Delete=false, cdi.kubevirt.io/storage.bind.immediate.requested: "true"}
 spec:
   sourceRef: {kind: DataSource, name: {{ required "openshellSaw.image.dataSource is required" $image.dataSource }}, namespace: {{ required "openshellSaw.image.namespace is required" $image.namespace }}}
-  storage: {accessModes: [ReadWriteOnce], resources: {requests: {storage: {{ printf "%vGi" (required "openshellSaw.image.diskSizeGi is required" $image.diskSizeGi) }}}}}
+  storage:
+    {{- with $image.storageClassName }}
+    storageClassName: {{ . | quote }}
+    {{- end }}
+    accessModes: [ReadWriteOnce]
+    resources: {requests: {storage: {{ printf "%vGi" (required "openshellSaw.image.diskSizeGi is required" $image.diskSizeGi) }}}}
 {{- end }}

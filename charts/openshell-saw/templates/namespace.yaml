@@ -1,4 +1,4 @@
-{{- if .Values.openshellSaw.tenant.name }}{{- $cfg := .Values.openshellSaw }}
+{{- if and .Values.openshellSaw.tenant.name .Values.openshellSaw.createNamespace }}{{- $cfg := .Values.openshellSaw }}
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -5,7 +5,7 @@ kind: InstallerBOM
 metadata:
   name: saw-example-2026-09
 spec:
-  installerVersion: 0.1.0
+  installerVersion: 0.2.0
   openshell:
     cli:
       version: 0.0.116-rhaiv.0

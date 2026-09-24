@@ -1,8 +1,9 @@
 # SAW guest service and versioned apply_bom.py
 
 Argo owns VM deployment and mounted configuration. ESO supplies provider Secrets.
-The guest service invokes the image-owned apply_bom.py; it contains no OpenShell
-API client, version-specific adapter, protobuf definitions or plugin registry.
+The guest service uses image-owned release bootstrap code to retrieve a signed,
+digest-pinned OCI bundle. The bundle contains apply_bom.py and the selected
+OpenShell payloads; the image contains no release-specific installer or payload.
 
 ## Folder responsibilities
 
@@ -10,7 +11,8 @@ API client, version-specific adapter, protobuf definitions or plugin registry.
 - saw_guest/inputs.py and mounts.py: capture approved read-only mounted inputs.
 - saw_guest/reconcile.py: single-writer lock, private pending/accepted progress,
   change detection and generic retention guards.
-- saw_guest/installer.py: invoke the fixed Python script and check its result.
+- saw_guest/release.py: verify, stage and activate the signed release bundle.
+- saw_guest/installer.py: invoke only the staged Python script and check its result.
   It does not interpret OpenShell responses or choose software versions.
 - saw_guest/health.py: expiring readiness based on completed verification.
 - systemd/: boot mounts and service lifecycle.
@@ -45,18 +47,20 @@ source packaging and offline tests. The mounted path uses CLI commands directly
 inside apply_bom.py, not the permissive legacy runner.
 
 This increment supports explicit workspace inference with an enabled provider,
-but not enabled sandboxes or legacy provider model/NemoClaw settings. Unsupported
-profiles fail preflight as a whole with SandboxApplyNotImplemented or
-ExplicitWorkspaceInferenceRequired. They do not
-partially create workspaces/providers and then report success.
+but does not yet support enabled sandboxes or legacy provider model/NemoClaw
+settings. These inputs fail preflight as a whole with SandboxApplyNotImplemented
+or ExplicitWorkspaceInferenceRequired, before any workspace or provider changes.
+Installer logic has its own signed release version; OpenShell payload changes
+still require a matching golden image.
 Software changes relative to the bundled release return SoftwareUpgradeNotImplemented;
 a later apply_bom.py release must implement controlled installation/upgrades.
 
-Consequently the current example workspace does NOT converge through this new
-path. External OIDC access, sandbox creation/replacement and live platform
-qualification remain. A clean sealed-image build recipe and isolated boot-smoke
-renderer are now available; see [image build](image/README.md). Build tooling is
-not itself proof of a successful boot or a production-qualified release.
+The default `data-science` example still requires sandbox support before it can
+converge through this guest path. External OIDC access and live platform
+qualification remain separate gates. A clean sealed-image build recipe and
+isolated boot-smoke renderer are available; see [image build](image/README.md).
+Build tooling is not itself proof of a successful boot or a production-qualified
+release.
 
 ### Local gateway bootstrap
 
@@ -177,7 +181,11 @@ Mounted paths:
 | /etc/saw/guest.json | Trusted public enrollment settings |
 | /var/lib/saw/reconciler/ | Private progress and sanitized readiness |
 
-Use ConfigMap/Secret virtiofs filesystems, not ISO disks, for live updates. Qualify
+Provider Secrets are named after the provider (`nvidia`, `brave`, and so on) and
+are scoped to the user namespace. The user Vault prefix (for example
+`saw/alice`) is used for paths such as `saw/alice/providers/nvidia`; the immutable
+OIDC subject remains the tenant ownership identity. Use ConfigMap/Secret virtiofs
+filesystems, not ISO disks, for live updates. Qualify
 the actual OpenShift/KubeVirt/Astra release, kernel, SELinux and migration behavior.
 [KubeVirt volumes](https://kubevirt.io/user-guide/storage/disks_and_volumes/)
 
@@ -189,8 +197,10 @@ does not rewrite an existing root automatically.
 
 ## Process and security contract
 
-The guest launches /usr/bin/python3 -I /opt/saw/installer/apply_bom.py with
---guest-phase validate, apply or verify. Input is bounded private JSON on stdin:
+The guest launches `/usr/bin/python3 -I /var/lib/saw/releases/current/apply_bom.py`
+with `--guest-phase validate`, `apply` or `verify`. The image-owned bootstrap
+verifies and activates that path from the signed OCI release bundle before the
+first invocation. Input is bounded private JSON on stdin:
 version: 1 and revision containing id, snapshot and planned actions. Output contains
 version, revision, ok and an optional nonsecret reason. No generic capability
 negotiation or OpenShell verification lives in this process wrapper.

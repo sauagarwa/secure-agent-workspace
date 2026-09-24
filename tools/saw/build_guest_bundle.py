@@ -21,13 +21,12 @@ from apply_bom import load_installer_bom  # noqa: E402
 
 FILES = {
     **{f"guest/saw_guest/{file}": f"opt/saw/guest/saw_guest/{file}" for file in
-       ("__init__.py", "__main__.py", "inputs.py", "reconcile.py", "installer.py", "mounts.py", "health.py", "errors.py")},
+       ("__init__.py", "__main__.py", "inputs.py", "reconcile.py", "installer.py", "mounts.py", "health.py", "errors.py", "release.py", "release_exec.py")},
     **{f"cli/src/openshell_saw/{file}": f"opt/saw/guest/openshell_saw/{file}" for file in
        ("__init__.py", "blueprints.py", "profiles.py")},
     **{f"guest/systemd/{file}": f"etc/systemd/system/{file}" for file in
        ("saw-guest.service", "saw-guest-mounts.service", "saw-openshell-gateway.service")},
     "guest/requirements.txt": "opt/saw/guest/requirements.txt",
-    "installer/apply_bom.py": "opt/saw/installer/apply_bom.py",
 }
 
 
@@ -35,10 +34,9 @@ def build(output, installer_bom):
     bom = load_installer_bom(installer_bom)
     contents = {destination: (ROOT / source).read_bytes() for source, destination in FILES.items()}
     # JSON is also YAML; canonical encoding makes equivalent input reproducible.
-    contents["opt/saw/installer/installer-bom.yaml"] = (json.dumps(bom, sort_keys=True, indent=2) + "\n").encode()
-    manifest = {"installerBOM": bom, "applyBomSha256": hashlib.sha256(contents["opt/saw/installer/apply_bom.py"]).hexdigest(),
+    manifest = {"installerBOM": bom,
                 "gatewayUnitSha256": hashlib.sha256(contents["etc/systemd/system/saw-openshell-gateway.service"]).hexdigest()}
-    contents["opt/saw/installer/build.json"] = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
+    contents["opt/saw/guest/build.json"] = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
     with Path(output).open("xb") as target:
         with gzip.GzipFile(filename="", fileobj=target, mode="wb", mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:

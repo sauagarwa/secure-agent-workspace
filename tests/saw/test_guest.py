@@ -1,6 +1,7 @@
 """Guest-only reconciliation contracts using synthetic mounts/runtime, no API access."""
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -401,11 +402,9 @@ def test_guest_bundle_is_reproducible_and_contains_no_credentials_or_controller(
         assert "opt/saw/guest/saw_guest/reconcile.py" in files
         assert all(m.uid == 0 and m.gid == 0 and m.mtime == 0 for m in archive.getmembers())
         assert all(m.mode == 0o644 for m in archive.getmembers())
-        assert "opt/saw/installer/apply_bom.py" in files
-        assert "opt/saw/installer/installer-bom.yaml" in files
-        import hashlib
-        manifest = json.load(archive.extractfile("opt/saw/installer/build.json"))
-        assert manifest["applyBomSha256"] == hashlib.sha256(archive.extractfile("opt/saw/installer/apply_bom.py").read()).hexdigest()
+        assert "opt/saw/guest/saw_guest/release.py" in files
+        assert "opt/saw/guest/saw_guest/release_exec.py" in files
+        manifest = json.load(archive.extractfile("opt/saw/guest/build.json"))
         assert manifest["gatewayUnitSha256"] == hashlib.sha256(archive.extractfile("etc/systemd/system/saw-openshell-gateway.service").read()).hexdigest()
         assert not any("controller" in p or "values" in p or "api.pb" in p or "adapter" in p for p in files)
     second_attempt = subprocess.run([sys.executable, str(ROOT / "tools/saw/build_guest_bundle.py"),

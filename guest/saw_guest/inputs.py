@@ -20,13 +20,16 @@ class InputsChanged(ValidationError):
 
 def validate_settings(settings):
     fields(settings, {"namespace", "instance", "ownerSubject", "enrollmentIdentity",
-                      "profileConfigMaps", "providerSecrets"},
+                      "profileConfigMaps", "providerSecrets", "oidcIssuer", "oidcAudience"},
            {"namespace", "instance", "ownerSubject", "enrollmentIdentity",
             "profileConfigMaps", "providerSecrets"}, "guest settings")
     name(settings["namespace"], "namespace")
     name(settings["instance"], "instance")
     string(settings["ownerSubject"], "owner subject", limit=512)
     string(settings["enrollmentIdentity"], "enrollment identity", r"[0-9a-f]{64}")
+    for key in ("oidcIssuer", "oidcAudience"):
+        if key in settings:
+            string(settings[key], key, limit=2048)
     profiles = settings["profileConfigMaps"]
     if not isinstance(profiles, list) or len(profiles) > 64:
         raise ValidationError("invalid profile catalog")

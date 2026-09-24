@@ -54,21 +54,26 @@ installer/profile/intent ConfigMaps and ESO resources. ESO owns provider Secret
 contents. The guest owns local runtime state; it does not write Kubernetes desired
 resources. Argo sync alone does not mean the workspace is ready.
 
-One reusable golden image contains OS/dependencies, guest service, the selected
-apply_bom.py and release BOM, plus qualified software payloads. No username,
+One reusable golden image contains only OS/dependencies, the guest service and
+the release-bundle verifier. The signed OCI release bundle contains
+apply_bom.py, the release BOM and the qualified OpenShell payloads. No username,
 provider credential, OIDC token, gateway identity, cloud-init instance state or
-private reconciliation journal may be baked into it. Two independent users must
-instantiate it through parameters, with no repository fork or tenant image rebuild.
+private reconciliation journal may be baked into either artifact. Two independent
+users must instantiate the same image and release bundle through parameters.
 
-tools/saw/build_guest_bundle.py pairs the BOM with the script and records its hash.
-It is a source bundle, not the golden-image builder. The image pipeline must install
-the selected payloads, verify their origin/inventory, qualify service startup,
-seal state, boot-test, scan/sign and promote the exact tested artifact.
+tools/saw/build_release_bundle.py creates the signed OCI bundle context. The image
+pipeline embeds only the release verification public key and bootstrap code. At
+boot, the guest pulls the platform-selected bundle by digest through rootless
+Podman, verifies its signature and file hashes, stages it atomically under
+/var/lib/saw/releases, and executes only that staged release. The image pipeline
+must still qualify service startup, seal state, boot-test, scan/sign and promote
+the exact tested image and bundle together.
 
-The current implementation expects image-installed software. Runtime installation/
-upgrade is not implemented yet; changed software input fails explicitly rather
-than overwriting running binaries. A future release can implement that lifecycle
-inside apply_bom.py without replacing the guest service.
+The guest image no longer contains OpenShell binaries or apply_bom.py. A changed
+bundle is a controlled release activation: the signed digest is staged and the
+previous verified release remains available if validation fails. The release
+reference is platform-owned; tenant-mounted input cannot select an arbitrary URL
+or executable.
 
 ## Tenant and credential boundaries
 
@@ -111,10 +116,11 @@ Secret does not erase credentials already loaded into a guest/runtime.
 
 ## Execution, failure and security
 
-The guest invokes the fixed image-owned /opt/saw/installer/apply_bom.py using isolated
-Python and bounded private stdin. It cannot execute a mounted script or arbitrary
-BOM command. The small validate/apply/verify process interface has no OpenShell API
-types or capability-negotiation layer. Verification belongs to the script.
+The guest invokes the verified root-owned release under
+/var/lib/saw/releases/current using isolated Python and bounded private stdin. It
+cannot execute a mounted script or arbitrary BOM command. The small
+validate/apply/verify process interface has no OpenShell API types or
+capability-negotiation layer. Verification belongs to the script.
 
 Keep a single writer, durable pending/accepted progress and protected credential
 snapshots. A changed input during partial apply must not replay revoked credentials

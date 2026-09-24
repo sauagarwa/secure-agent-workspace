@@ -20,7 +20,8 @@ section() { echo; bold "$1"; }
 
 check_api() {
   local group="$1" resource="$2" label="$3" hint="$4"
-  if oc api-resources --api-group="$group" -o name 2>/dev/null | grep -Fqx "$resource"; then
+  if oc api-resources --api-group="$group" -o name 2>/dev/null | grep -Fqx "$resource" \
+      || oc get crd "$resource" >/dev/null 2>&1; then
     ok "$label"
   else
     fail "$label API missing (group: $group, resource: $resource)" "$hint"
@@ -29,7 +30,8 @@ check_api() {
 
 check_optional_api() {
   local group="$1" resource="$2" label="$3" required="$4" hint="$5"
-  if oc api-resources --api-group="$group" -o name 2>/dev/null | grep -Fqx "$resource"; then
+  if oc api-resources --api-group="$group" -o name 2>/dev/null | grep -Fqx "$resource" \
+      || oc get crd "$resource" >/dev/null 2>&1; then
     ok "$label"
   elif [[ "$required" == "1" ]]; then
     fail "$label API missing (required by explicit configuration)" "$hint"

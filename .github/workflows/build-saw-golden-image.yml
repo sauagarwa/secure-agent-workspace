@@ -23,10 +23,20 @@ concurrency:
 
 jobs:
   build:
-    name: Build candidate golden image
+    name: Build ${{ matrix.variant.name }} golden image
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment: saw-golden-image
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: production
+            ssh: false
+            suffix: ""
+          - name: development-ssh
+            ssh: true
+            suffix: "-ssh"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -58,11 +68,25 @@ jobs:
       - name: Generate allowlisted image build context
         env:
           BOM: ${{ steps.release.outputs.bom }}
+          SSH_ENABLED: ${{ matrix.variant.ssh }}
+          RELEASE_PUBLIC_KEY: ${{ secrets.SAW_RELEASE_PUBLIC_KEY }}
         run: |
           set -euo pipefail
-          python tools/saw/build_image_context.py \
-            --installer-bom "$BOM" \
+          test -n "$RELEASE_PUBLIC_KEY" || {
+            echo 'Set the SAW_RELEASE_PUBLIC_KEY environment secret to the release verification public key.' >&2
+            exit 1
+          }
+          key_file="$RUNNER_TEMP/release-signing-public-key.pem"
+          printf '%s\n' "$RELEASE_PUBLIC_KEY" > "$key_file"
+          args=(
+            --installer-bom "$BOM"
             --output "$RUNNER_TEMP/saw-image-context"
+            --release-public-key "$key_file"
+          )
+          if [ "$SSH_ENABLED" = true ]; then
+            args+=(--enable-ssh)
+          fi
+          python tools/saw/build_image_context.py "${args[@]}"
 
       - name: Prepare host-native VM image build
         run: |
@@ -91,50 +115,14 @@ jobs:
           curl --fail --location --retry 3 \
             --output fedora-base.qcow2 \
             https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
-          echo '28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f  fedora-base.qcow2' | sha256sum --check
 
-      - name: Extract pinned runtime artifacts
-        env:
-          BOM: ${{ steps.release.outputs.bom }}
-        run: |
-          set -euo pipefail
-          cli_image="$(python - "$BOM" <<'PY'
-          import sys, yaml
-          print(yaml.safe_load(open(sys.argv[1]))['spec']['openshell']['cli']['image'])
-          PY
-          )"
-          gateway_image="$(python - "$BOM" <<'PY'
-          import sys, yaml
-          print(yaml.safe_load(open(sys.argv[1]))['spec']['openshell']['gateway']['image'])
-          PY
-          )"
-          supervisor_image="$(python - "$BOM" <<'PY'
-          import sys, yaml
-          print(yaml.safe_load(open(sys.argv[1]))['spec']['openshell']['supervisor']['image'])
-          PY
-          )"
-          payload="$RUNNER_TEMP/payload"
-          mkdir -p "$payload"
-
-          docker pull "$cli_image"
-          cli_container="$(docker create "$cli_image")"
-          docker cp "$cli_container:/usr/local/bin/openshell" "$payload/openshell"
-          docker rm "$cli_container" >/dev/null
-
-          docker pull "$gateway_image"
-          gateway_container="$(docker create "$gateway_image")"
-          docker cp "$gateway_container:/usr/local/bin/openshell-gateway" "$payload/openshell-gateway"
-          docker rm "$gateway_container" >/dev/null
-
-          docker pull "$supervisor_image"
-          supervisor_container="$(docker create "$supervisor_image")"
-          docker cp "$supervisor_container:/openshell-sandbox" "$payload/openshell-supervisor"
-          docker rm "$supervisor_container" >/dev/null
-          chmod 0755 "$payload"/*
+      - name: Verify Fedora Cloud base image
+        run: echo '28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f  fedora-base.qcow2' | sha256sum --check
 
       - name: Customize QCOW2 on the GitHub host
         env:
           BOM: ${{ steps.release.outputs.bom }}
+          SSH_ENABLED: ${{ matrix.variant.ssh }}
         run: |
           set -euo pipefail
           guest="$RUNNER_TEMP/guest-root"
@@ -153,15 +141,25 @@ jobs:
           sudo mount --bind /dev/pts "$guest/dev/pts"
           echo 'nameserver 8.8.8.8' | sudo tee "$guest/etc/resolv.conf" >/dev/null
 
-          sudo chroot "$guest" dnf install -y \
+          packages=(
             podman shadow-utils slirp4netns passt fuse-overlayfs python3 \
             python3-pyyaml cloud-init qemu-guest-agent openssl
-          sudo mkdir -p "$guest/opt/payload"
-          sudo cp "$RUNNER_TEMP/payload"/* "$guest/opt/payload/"
+          )
+          if [ "$SSH_ENABLED" = true ]; then
+            packages+=(openssh-server)
+          fi
+          sudo chroot "$guest" dnf install -y "${packages[@]}"
           sudo cp "$RUNNER_TEMP/saw-image-context/guest.tar.gz" "$guest/opt/guest.tar.gz"
           sudo cp "$RUNNER_TEMP/saw-image-context/customize.sh" "$guest/opt/customize.sh"
+          sudo cp "$RUNNER_TEMP/saw-image-context/release-signing-public-key.pem" \
+            "$guest/etc/release-signing-public-key.pem"
           sudo chmod 0755 "$guest/opt/customize.sh"
           sudo chroot "$guest" /opt/customize.sh
+          if [ "$SSH_ENABLED" = true ]; then
+            sudo cp "$RUNNER_TEMP/saw-image-context/enable-ssh.sh" "$guest/opt/enable-ssh.sh"
+            sudo chmod 0755 "$guest/opt/enable-ssh.sh"
+            sudo chroot "$guest" /opt/enable-ssh.sh
+          fi
           sudo touch "$guest/.autorelabel"
 
           cleanup
@@ -177,7 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$GH_OWNER" | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/saw-golden-image:${RELEASE}"
+          image="ghcr.io/${owner}/saw-golden-image:${RELEASE}${{ matrix.variant.suffix }}"
           oci_context="$RUNNER_TEMP/oci-context"
           mkdir -p "$oci_context"
           cp "$RUNNER_TEMP/disk.qcow2" "$oci_context/disk.qcow2"
@@ -199,6 +197,7 @@ jobs:
           image_ref="ghcr.io/${owner}/saw-golden-image@${digest}"
           {
             echo "release=$RELEASE"
+            echo "variant=${{ matrix.variant.name }}"
             echo "imageRef=$image_ref"
             echo "imageDigest=$digest"
             echo "registryURL=docker://$image_ref"
@@ -207,7 +206,7 @@ jobs:
       - name: Upload candidate metadata
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
         with:
-          name: saw-golden-image-${{ steps.release.outputs.release }}
+          name: saw-golden-image-${{ steps.release.outputs.release }}-${{ matrix.variant.name }}
           path: |
             ${{ runner.temp }}/saw-golden-image-release.txt
             ${{ runner.temp }}/image-build.log
@@ -215,5 +214,5 @@ jobs:
 
       - name: Print promotion instructions
         run: |
-          echo "The image is in GHCR. Complete smoke, scan, signature, and approval gates before using its registryURL in sawBlueprint.goldenImages[]."
+          echo "The ${{ matrix.variant.name }} image is in GHCR. Complete smoke, scan, signature, and approval gates before use."
           echo "The workflow intentionally does not create the production CDI DataSource."

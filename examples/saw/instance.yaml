@@ -13,9 +13,9 @@ spec:
       credentialBindings:
         inference-main:
           secretRef:
-            name: saw-provider-nvidia
+            name: nvidia
             key: api_key
         web-search:
           secretRef:
-            name: saw-provider-brave
+            name: brave
             key: api_key

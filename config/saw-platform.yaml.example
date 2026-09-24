@@ -24,6 +24,8 @@ sawPlatform:
     # Discover with: oc get datasource -n saw-images
     dataSource: ""
     diskSizeGi: 40
+    # Optional class for tenant root disks when the cluster default is unsuitable.
+    # storageClassName: immediate-binding-class
   # Installer metadata is not safely inferable from a running cluster.
   # Fill this with the release owner's approved immutable bundle reference,
   # digest, and InstallerBOM (see examples/saw/installer-bom.yaml).

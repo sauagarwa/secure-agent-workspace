@@ -30,6 +30,12 @@ def boot(installer, monkeypatch, tmp_path, pki):
     root, client = tmp_path / "gateway", tmp_path / "client"
     monkeypatch.setattr(installer, "GUEST_GATEWAY_ROOT", root)
     monkeypatch.setattr(installer, "GUEST_CLIENT_CONFIG", client)
+    settings_path = tmp_path / "guest.json"
+    settings_path.write_text(json.dumps({"namespace": "saw-test", "instance": "test",
+        "ownerSubject": "owner", "enrollmentIdentity": "a" * 64,
+        "profileConfigMaps": [], "providerSecrets": {}}))
+    settings_path.chmod(0o600)
+    monkeypatch.setattr(installer, "GUEST_SETTINGS_PATH", settings_path)
     monkeypatch.setattr(installer, "GUEST_INSTALLED_BOM", ROOT / "examples/saw/installer-bom.yaml")
     monkeypatch.setattr(installer, "guest_runtime_account", lambda: SimpleNamespace(pw_uid=1001, pw_gid=1001, pw_dir="/home/cloud-user"))
     monkeypatch.setattr(installer, "prepare_rootless_podman", lambda apply=False: True)
@@ -221,7 +227,7 @@ def test_active_systemd_unit_is_not_sufficient_for_readiness(installer, boot):
 def test_bootstrap_config_and_unit_do_not_expose_admin_or_inherit_environment(installer, monkeypatch):
     monkeypatch.setattr(installer, "GUEST_INSTALLED_BOM", ROOT / "examples/saw/installer-bom.yaml")
     monkeypatch.setattr(installer, "guest_runtime_account", lambda: SimpleNamespace(pw_uid=1001, pw_gid=1001))
-    config = tomllib.loads(installer.guest_gateway_config().decode())
+    config = tomllib.loads(installer.guest_gateway_config({}).decode())
     gateway = config["openshell"]["gateway"]
     assert gateway["bind_address"] == "127.0.0.1:17670"
     assert gateway["mtls_auth"]["enabled"] is True
@@ -278,7 +284,7 @@ def test_podman_supervisor_image_follows_selected_release(installer, monkeypatch
     path = tmp_path / "release.yaml"
     path.write_text(json.dumps(bom))
     monkeypatch.setattr(installer, "GUEST_INSTALLED_BOM", path)
-    config = tomllib.loads(installer.guest_gateway_config().decode())
+    config = tomllib.loads(installer.guest_gateway_config({}).decode())
     assert config["openshell"]["drivers"]["podman"]["supervisor_image"] == expected
 
 
@@ -340,7 +346,7 @@ def test_systemd_restart_guard_rejects_a_cloned_identity_without_logging(install
     original = installer.guest_private_read
 
     def read(path):
-        return json.dumps(settings).encode() if path == Path("/etc/saw/guest.json") else original(path)
+        return json.dumps(settings).encode() if path == installer.GUEST_SETTINGS_PATH else original(path)
 
     monkeypatch.setattr(installer, "guest_private_read", read)
     assert installer.guest_gateway_check() == 0

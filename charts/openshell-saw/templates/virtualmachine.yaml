@@ -1,5 +1,41 @@
-{{- if .Values.openshellSaw.tenant.name }}{{- $cfg := .Values.openshellSaw }}{{- $ns := include "openshell-saw.namespace" $cfg }}{{- $i := $cfg.instance }}{{- $g := $cfg.guest }}{{- $r := $cfg.installerRelease }}{{- $p := $cfg.profileConfigMaps }}
-{{- if and $g.enabled $i $r }}{{- $secrets := list }}{{- range $c := $cfg.tenant.credentials }}{{- $secrets = append $secrets (printf "saw-provider-%s" $c.name) }}{{- end }}{{- $profiles := list }}{{- range $cm := $p }}{{- $profiles = append $profiles $cm.name }}{{- end }}
+{{- if .Values.openshellSaw.tenant.name }}
+{{- $cfg := .Values.openshellSaw }}
+{{- $ns := include "openshell-saw.namespace" $cfg }}
+{{- $i := $cfg.instance }}
+{{- $g := $cfg.guest }}
+{{- $r := $cfg.installerRelease }}
+{{- $p := $cfg.profileConfigMaps }}
+{{- if and $g.enabled $i $r }}
+{{- $providerSecrets := dict }}
+{{- $credentials := $cfg.tenant.credentials }}
+{{- if hasKey $cfg "providerCredentials" }}{{- $credentials = $cfg.providerCredentials }}{{- end }}
+{{- range $selection := $i.workspaces }}
+  {{- range $bindingName, $binding := ($selection.credentialBindings | default dict) }}
+    {{- $ref := $binding.secretRef | default dict }}
+    {{- $refName := $ref.name | default "" }}
+    {{- $secretKey := $ref.key | default "" }}
+    {{- $matches := list }}
+    {{- range $credential := $credentials }}
+      {{- if or (eq $credential.name $bindingName) (eq $credential.name $refName) (eq $credential.remoteKey $refName) }}
+        {{- $matches = append $matches $credential }}
+      {{- end }}
+    {{- end }}
+    {{- if ne (len $matches) 1 }}
+      {{- fail "credential binding must resolve to exactly one tenant.credentials entry" }}
+    {{- end }}
+    {{- $credential := first $matches }}
+    {{- if not (has $secretKey $credential.keys) }}
+      {{- fail "credential binding key must be declared in tenant.credentials.keys" }}
+    {{- end }}
+    {{- $secretName := $credential.remoteKey }}
+    {{- $keys := get $providerSecrets $secretName | default (list) }}
+    {{- if not (has $secretKey $keys) }}{{- $keys = append $keys $secretKey }}{{- end }}
+    {{- $_ := set $providerSecrets $secretName $keys }}
+  {{- end }}
+{{- end }}
+{{- $secrets := keys $providerSecrets | sortAlpha }}
+{{- $profiles := list }}
+{{- range $cm := $p }}{{- $profiles = append $profiles $cm.name }}{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: saw-guest, namespace: {{ $ns }}}
@@ -18,10 +54,11 @@ spec:
         resources: {requests: {memory: {{ printf "%vGi" (required "guest.memoryGi is required" $g.memoryGi) }}}}
         devices:
           autoattachPodInterface: true
+          interfaces: [{name: default, masquerade: {}}]
           disks: [{name: rootdisk, disk: {bus: virtio}}, {name: cloudinit, disk: {bus: virtio}}]
           filesystems:
             - {name: saw-intent, virtiofs: {}}
-            - {name: saw-installer, virtiofs: {}}
+            - {name: saw-installer-bom, virtiofs: {}}
             {{- range $n, $_ := $p }}
             - {name: saw-profile-{{ $n }}, virtiofs: {}}
             {{- end }}{{- range $n, $_ := $secrets }}
@@ -34,10 +71,22 @@ spec:
           cloudInitNoCloud:
             userData: |-
               #cloud-config
-              write_files: [{path: /etc/saw/guest.json, owner: root:root, permissions: '0600', content: {{ dict "namespace" $ns "instance" $cfg.tenant.name "enrollmentIdentity" (include "openshell-saw.identity" $cfg) "ownerSubject" $cfg.tenant.subject "profileConfigMaps" $profiles "providerSecrets" $secrets | toJson | quote }}]
-              runcmd: [[systemctl, enable, saw-guest.service], [systemctl, --no-block, start, saw-guest.service]]
+              {{- with $g.sshPublicKey }}
+              ssh_authorized_keys:
+                - {{ . | quote }}
+              {{- end }}
+              write_files:
+                - path: /etc/saw/guest.json
+                  owner: root:root
+                  permissions: '0600'
+                  content: |
+                    {{ dict "namespace" $ns "instance" $cfg.tenant.name "enrollmentIdentity" (include "openshell-saw.identity" $cfg) "ownerSubject" $cfg.tenant.subject "profileConfigMaps" $profiles "providerSecrets" $providerSecrets "oidcIssuer" $cfg.platform.issuer "oidcAudience" "openshell-cli" | toJson | nindent 20 }}
+              {{- with $g.sshPublicKey }}
+              runcmd:
+                - [systemctl, enable, --now, sshd.service]
+              {{- end }}
         - {name: saw-intent, configMap: {name: {{ printf "%s-intent" $cfg.tenant.name }}}}
-        - {name: saw-installer, configMap: {name: {{ printf "%s-installer" $cfg.tenant.name }}}}
+        - {name: saw-installer-bom, configMap: {name: {{ printf "%s-installer" $cfg.tenant.name }}}}
         {{- range $n, $cm := $p }}
         - {name: saw-profile-{{ $n }}, configMap: {name: {{ $cm.name }}}}
         {{- end }}{{- range $n, $name := $secrets }}

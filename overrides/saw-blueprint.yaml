@@ -7,8 +7,5 @@ sawBlueprint:
   deployerServiceAccount:
     name: ""
     namespace: ""
-  goldenImages:
-    - name: saw-example-2026-09
-      registryURL: docker://ghcr.io/sauagarwa/saw-golden-image@sha256:9317f8df2352cbb77f7f2643baf00e440b4e527afe1a58a136f0e766c633bd57
-      diskSizeGi: 40
+  goldenImages: []
   tenants: []

@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path[:0] = ['/opt/saw/guest', '/opt/saw/installer']
+sys.path[:0] = ['/opt/saw/guest', '/var/lib/saw/releases/current']
 import apply_bom  # noqa: E402
 from saw_guest.health import ready  # noqa: E402
 from saw_guest.inputs import MountedInputs  # noqa: E402

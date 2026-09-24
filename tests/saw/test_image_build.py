@@ -26,8 +26,8 @@ def test_image_context_contains_only_release_inputs(builder, tmp_path):
     assert set(p.name for p in output.iterdir()) == {'Dockerfile', 'guest.tar.gz', 'customize.sh', 'build-inputs.json'}
     recipe = (output / 'Dockerfile').read_text()
     for item in manifest['installerBOM']['spec']['openshell'].values():
-        assert item['image'] in recipe
-    assert '@CLI_IMAGE@' not in recipe
+        assert item['image'] not in recipe
+    assert 'payload' not in recipe
     assert 'force_tcg' in recipe  # Image build needs no privileged host KVM device.
     assert 'sha256sum --check' in recipe
     assert recipe.rstrip().endswith('/disk/disk.qcow2')
@@ -57,7 +57,9 @@ def test_image_seals_identity_and_does_not_grant_runtime_sudo():
     script = ROOT / 'guest/image/customize.sh'
     subprocess.run(['bash', '-n', str(script)], check=True)
     content = script.read_text()
-    assert 'verify_installed_software' in content
+    assert 'install -m 0644 /etc/release-signing-public-key.pem /etc/saw/release-signing-public-key.pem' in content
+    assert 'rm -f /etc/release-signing-public-key.pem' in content
+    assert 'apply_bom.py' not in content
     assert "usermod --groups '' --lock cloud-user" in content
     assert "'sudo': []" in content
     assert 'clean --logs --seed --machine-id' in content
