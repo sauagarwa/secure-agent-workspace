@@ -7,11 +7,11 @@ wildcard matching only supports a trailing wildcard, which can't express "any
 per-VM hostname, fixed path").
 */}}
 {{- if .Values.dashboard.enabled }}
-{{- $kcNs := .Values.dashboard.keycloakNamespace | default .Release.Namespace }}
+{{- $kcNs := include "openshell-sandbox.keycloakNamespace" . }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "openshell-sandbox.fullname" . }}-keycloak-admin-read
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-keycloak-admin-read
   namespace: {{ $kcNs }}
   labels:
     {{- include "openshell-sandbox.labels" . | nindent 4 }}
@@ -24,7 +24,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "openshell-sandbox.fullname" . }}-keycloak-admin-read
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-keycloak-admin-read
   namespace: {{ $kcNs }}
   labels:
     {{- include "openshell-sandbox.labels" . | nindent 4 }}
@@ -34,6 +34,6 @@ subjects:
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: Role
-  name: {{ include "openshell-sandbox.fullname" . }}-keycloak-admin-read
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-keycloak-admin-read
   apiGroup: rbac.authorization.k8s.io
 {{- end }}

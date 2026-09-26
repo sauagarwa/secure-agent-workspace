@@ -41,7 +41,7 @@ Priority: explicit oidc.issuerUrl > computed from global.clusterDomain.
   {{- .Values.oidc.issuerUrl -}}
 {{- else if .Values.global -}}
   {{- if .Values.global.clusterDomain -}}
-    {{- printf "https://%s-ingress-%s.apps.%s/realms/%s" .Values.oidc.keycloakName .Release.Namespace .Values.global.clusterDomain .Values.oidc.realm -}}
+    {{- printf "https://%s-ingress-%s.apps.%s/realms/%s" .Values.oidc.keycloakName (.Values.oidc.keycloakNamespace | default .Release.Namespace) .Values.global.clusterDomain .Values.oidc.realm -}}
   {{- end -}}
 {{- end -}}
 {{- end }}
@@ -130,7 +130,21 @@ Call with (list $ "webui" .Values.route.webuiHost).
 Governance interceptor gRPC endpoint reachable from the VM.
 */}}
 {{- define "openshell-sandbox.governanceEndpoint" -}}
-{{- .Values.governance.endpoint | default (printf "http://governance-interceptor.%s.svc.cluster.local:%v" .Release.Namespace (.Values.governance.port | default 18081)) -}}
+{{- .Values.governance.endpoint | default (printf "http://governance-interceptor.%s.svc.cluster.local:%v" (.Values.governance.namespace | default .Release.Namespace) (.Values.governance.port | default 18081)) -}}
+{{- end }}
+
+{{/*
+Namespace of Keycloak's "<keycloakName>-initial-admin" Secret.
+*/}}
+{{- define "openshell-sandbox.keycloakNamespace" -}}
+{{- .Values.dashboard.keycloakNamespace | default .Values.oidc.keycloakNamespace | default .Release.Namespace -}}
+{{- end }}
+
+{{/*
+Namespace of the golden image DataSource.
+*/}}
+{{- define "openshell-sandbox.goldenNamespace" -}}
+{{- .Values.source.dataSourceNamespace | default .Release.Namespace -}}
 {{- end }}
 
 {{/*

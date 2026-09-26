@@ -25,7 +25,7 @@ HELM = shutil.which("helm")
 pytestmark = pytest.mark.skipif(not HELM, reason="helm is not installed")
 
 
-def helm_template(chart=CHART, *args, release="saw-test", namespace="openshell-agents"):
+def helm_template(chart=CHART, *args, release="saw-test", namespace="saw-alice"):
     return subprocess.run([HELM, "template", release, str(chart), "--namespace", namespace, *args],
                           capture_output=True, text=True)
 
@@ -244,24 +244,29 @@ def test_governance_can_be_disabled():
     assert "interceptors" not in toml["openshell"].get("gateway", {})
 
 
-def test_governance_endpoint_defaults_to_release_namespace(default_docs):
+def test_governance_endpoint_is_the_shared_namespace(default_docs):
+    # The SAW runs in saw-alice; the interceptor stays in openshell-agents.
     _, toml = gateway_files(default_docs)
     [interceptor] = toml["openshell"]["gateway"]["interceptors"]
     assert interceptor["grpc_endpoint"] == \
         "http://governance-interceptor.openshell-agents.svc.cluster.local:18081"
+    _, toml = gateway_files(render("--set", "governance.namespace=gov"))
+    assert toml["openshell"]["gateway"]["interceptors"][0]["grpc_endpoint"] == \
+        "http://governance-interceptor.gov.svc.cluster.local:18081"
 
 
 def test_cluster_domain_fills_routes_issuer_and_dashboard():
     docs = render("--set", "global.clusterDomain=example.com")
     config = json.loads(installer_data(docs)["config.json"])
+    # Keycloak lives in its own namespace (default "keycloak").
     assert config["oidcIssuer"] == \
-        "https://openshell-keycloak-ingress-openshell-agents.apps.example.com/realms/openshell"
+        "https://openshell-keycloak-ingress-keycloak.apps.example.com/realms/openshell"
     assert config["dashboard"]["redirectUrl"] == \
-        "https://saw-test-webui-openshell-agents.apps.example.com/oauth2/callback"
-    assert config["sandboxDashboardRoute"] == "saw-test-dashboard-openshell-agents.apps.example.com"
+        "https://saw-test-webui-saw-alice.apps.example.com/oauth2/callback"
+    assert config["sandboxDashboardRoute"] == "saw-test-dashboard-saw-alice.apps.example.com"
     # The installer turns routeHost into the gateway certificate SAN drop-in.
-    assert config["routeHost"] == "saw-test-gateway-openshell-agents.apps.example.com"
-    assert "OPENSHELL_ROUTE_FQDN=saw-test-gateway-openshell-agents.apps.example.com" in \
+    assert config["routeHost"] == "saw-test-gateway-saw-alice.apps.example.com"
+    assert "OPENSHELL_ROUTE_FQDN=saw-test-gateway-saw-alice.apps.example.com" in \
         installer_data(docs)["gateway.env"]
 
 
@@ -348,3 +353,76 @@ def test_rendered_inputs_validate_in_the_shipped_installer(tmp_path, default_doc
     assert "inputs are valid" in result.stdout
     assert "2 workspace(s) ['cuda-dev', 'default']" in result.stdout
     assert "3 credential(s)" in result.stdout
+
+
+# -- per-SAW namespaces ----------------------------------------------------------
+
+def all_docs(*args, namespace="saw-alice"):
+    result = helm_template(CHART, "--set", "sandboxName=saw-test", *args, namespace=namespace)
+    assert result.returncode == 0, result.stderr
+    return [d for d in yaml.safe_load_all(result.stdout) if d]
+
+
+def test_saw_namespace_can_bootstrap_the_shared_golden_image():
+    docs = all_docs()
+    role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"].endswith("golden-image"))
+    binding = next(d for d in docs if d["kind"] == "RoleBinding" and d["metadata"]["name"].endswith("golden-image"))
+    assert role["metadata"]["namespace"] == "openshell-agents"
+    assert binding["metadata"]["namespace"] == "openshell-agents"
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "saw-test-prepare", "namespace": "saw-alice"}]
+    vm = next(d for d in docs if d["kind"] == "VirtualMachine")
+    assert vm["spec"]["dataVolumeTemplates"][0]["spec"]["sourceRef"]["namespace"] == "openshell-agents"
+
+
+def test_no_cross_namespace_role_when_sharing_the_golden_namespace():
+    docs = all_docs(namespace="openshell-agents")
+    assert not [d for d in docs if d["metadata"]["name"].endswith("golden-image")]
+    docs = all_docs("--set", "source.registryURL=docker://quay.io/x/disk:1")
+    assert not [d for d in docs if d["metadata"]["name"].endswith("golden-image")]
+
+
+def test_keycloak_admin_access_is_granted_in_the_keycloak_namespace():
+    docs = all_docs()
+    kc = [d for d in docs if "keycloak-admin-read" in d["metadata"]["name"]]
+    assert {d["metadata"]["namespace"] for d in kc} == {"keycloak"}
+    assert all(d["metadata"]["name"] == "saw-test-saw-alice-keycloak-admin-read" for d in kc)
+    docs = all_docs("--set", "oidc.keycloakNamespace=sso")
+    assert {d["metadata"]["namespace"] for d in docs if "keycloak-admin-read" in d["metadata"]["name"]} == {"sso"}
+    prepare = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "saw-test-prepare-scripts")
+    assert 'KEYCLOAK_NS="sso"' in prepare["data"]["prepare.sh"]
+
+
+def test_cluster_scoped_names_include_the_namespace():
+    """Two SAWs with the same name in different namespaces must not collide."""
+    names_a = {(d["kind"], d["metadata"]["name"]) for d in all_docs(namespace="saw-a")
+               if d["kind"].startswith("Cluster")}
+    names_b = {(d["kind"], d["metadata"]["name"]) for d in all_docs(namespace="saw-b")
+               if d["kind"].startswith("Cluster")}
+    assert names_a and not names_a & names_b
+
+
+GOV_CHART = ROOT / "charts" / "governance-interceptor"
+
+
+def test_governance_interceptor_admits_labelled_saw_namespaces():
+    result = subprocess.run([HELM, "template", "gov", str(GOV_CHART), "--namespace", "openshell-agents"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    policy = next(d for d in yaml.safe_load_all(result.stdout) if d and d["kind"] == "NetworkPolicy")
+    sources = policy["spec"]["ingress"][0]["from"]
+    assert {"podSelector": {"matchLabels": {"kubevirt.io": "virt-launcher"}}} in sources
+    assert {"namespaceSelector": {"matchLabels": {"openshell.pattern/saw": "true"}},
+            "podSelector": {"matchLabels": {"kubevirt.io": "virt-launcher"}}} in sources
+
+
+def test_pattern_puts_keycloak_and_each_saw_in_their_own_namespaces():
+    values = yaml.safe_load((ROOT / "values-prod.yaml").read_text())["clusterGroup"]
+    namespaces, apps, subs = values["namespaces"], values["applications"], values["subscriptions"]
+    assert namespaces["keycloak"]["targetNamespaces"] == ["keycloak"]
+    assert subs["rhbk"]["namespace"] == "keycloak"
+    assert apps["openshell-keycloak"]["namespace"] == "keycloak"
+    assert namespaces["saw-alice"]["labels"]["openshell.pattern/saw"] == "true"
+    for app in ("openshell-saw", "saw-bom", "pattern-secrets"):
+        assert apps[app]["namespace"] == "saw-alice", app
+    for app in ("governance-interceptor", "governance-policy"):
+        assert apps[app]["namespace"] == "openshell-agents", app

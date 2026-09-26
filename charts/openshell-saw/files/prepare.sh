@@ -7,7 +7,7 @@ set -euo pipefail
 VM_NAME="{{ include "openshell-sandbox.fullname" . }}"
 NS="{{ .Release.Namespace }}"
 GOLDEN_DS="{{ include "openshell-sandbox.dataSourceName" . }}"
-GOLDEN_NS="{{ .Values.source.dataSourceNamespace | default .Release.Namespace }}"
+GOLDEN_NS="{{ include "openshell-sandbox.goldenNamespace" . }}"
 GOLDEN_DISK_SIZE="{{ .Values.vm.diskSize }}"
 GOLDEN_IMAGE_URL="{{ .Values.source.goldenImageURL }}"
 PULL_METHOD="{{ .Values.source.pullMethod | default "node" }}"
@@ -16,7 +16,7 @@ DASHBOARD_CLIENT_ID="{{ .Values.dashboard.clientId }}"
 OIDC_ISSUER_URL="{{ include "openshell-sandbox.oidcIssuerUrl" . }}"
 OIDC_KEYCLOAK_NAME="{{ .Values.oidc.keycloakName }}"
 OIDC_REALM="{{ .Values.oidc.realm }}"
-KEYCLOAK_NS="{{ .Values.dashboard.keycloakNamespace | default .Release.Namespace }}"
+KEYCLOAK_NS="{{ include "openshell-sandbox.keycloakNamespace" . }}"
 SCRIPTS_DIR="/scripts"
 
 # --- Phase 1: tools ---

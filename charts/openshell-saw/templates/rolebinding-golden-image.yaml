@@ -1,0 +1,39 @@
+{{- /*
+The golden image DataSource lives in a shared namespace, while each SAW has
+its own. Let this SAW's prepare Job create the DataSource there on first use
+(bootstrap-golden-image.sh). Cross-namespace cloning of the root disk is
+authorised separately by the gateway image chart (clone-rbac.yaml).
+*/ -}}
+{{- $golden := include "openshell-sandbox.goldenNamespace" . }}
+{{- if and (not (or .Values.source.registryURL .Values.source.httpURL)) (ne $golden .Release.Namespace) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-golden-image
+  namespace: {{ $golden }}
+  labels:
+    {{- include "openshell-sandbox.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datavolumes"]
+    verbs: ["get", "list", "create"]
+  - apiGroups: ["cdi.kubevirt.io"]
+    resources: ["datasources"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-golden-image
+  namespace: {{ $golden }}
+  labels:
+    {{- include "openshell-sandbox.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshell-sandbox.fullname" . }}-prepare
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-golden-image
+{{- end }}

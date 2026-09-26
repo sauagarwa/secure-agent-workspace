@@ -99,6 +99,9 @@ oidc:
   issuerUrl: ""
   clientId: "openshell-cli"
   keycloakName: "openshell-keycloak"
+  # Namespace Keycloak runs in (any namespace works). Used to compute the
+  # issuer URL from global.clusterDomain and to find its admin Secret.
+  keycloakNamespace: "keycloak"
   realm: "openshell"
   rolesClaim: "realm_access.roles"
   adminRole: "openshell-admin"
@@ -131,14 +134,17 @@ dashboard:
   image: "quay.io/gkrumbach07/openshell-dashboard:latest"
   proxyImage: "quay.io/oauth2-proxy/oauth2-proxy:v7.9.0"
   clientId: "openshell-dashboard"
-  # Namespace of Keycloak and its "<keycloakName>-initial-admin" Secret, read
-  # by the prepare Job to register this VM's redirect URI. Empty = release namespace.
+  # Override the Keycloak namespace for the admin Secret lookup only.
+  # Empty = oidc.keycloakNamespace.
   keycloakNamespace: ""
   insecureSkipIssuerTlsVerify: false
 
 # Governance interceptor — enforces signed sandbox policies.
 governance:
   enabled: true
+  # Shared namespace where the governance-interceptor chart runs. SAWs live in
+  # their own namespaces, so the default endpoint points here.
+  namespace: "openshell-agents"
   endpoint: ""
   port: 18081
   allowInsecureTransport: true
@@ -155,6 +161,6 @@ job:
   # Wait for ESO-managed secrets before starting the prepare Job.
   waitForSecrets: false
 
-# Namespace strategy: "shared" places all sandboxes in the release namespace;
-# "perUser" expects a per-user namespace (e.g. saw-<username>).
-namespaceMode: shared
+# Each SAW is installed into its own namespace (the release namespace), e.g.
+# saw-<name>. Label that namespace openshell.pattern/saw=true so the shared
+# governance interceptor accepts its VM (make openshell-saw-create does this).

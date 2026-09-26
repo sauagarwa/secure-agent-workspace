@@ -51,6 +51,32 @@ oc logs -f -l vm.kubevirt.io/name=<vm> -c guest-console-log --tail=-1
 # or: make openshell-saw-logs OPENSHELL_SAW_NAME=<vm>
 ```
 
+## Namespaces
+
+| Namespace | What lives there |
+| --- | --- |
+| `saw-<name>` (one per SAW) | the SAW's VM, its installer/profile ConfigMaps, its provider Secrets, prepare Job. Labelled `openshell.pattern/saw=true`. |
+| `openshell-agents` (shared, `NS`) | golden image DataSource, image builds, governance interceptor + policy |
+| `keycloak` (`KEYCLOAK_NS`, any name) | Keycloak and the RHBK operator |
+
+- A VM can only attach ConfigMaps/Secrets from its own namespace, so each
+  SAW's `inference`/`web-search` Secrets and `saw-bom-profiles` ConfigMap
+  must be in its `saw-<name>` namespace.
+- The governance interceptor admits gateway VMs from namespaces labelled
+  `openshell.pattern/saw=true` (`make openshell-saw-create` and
+  `values-prod.yaml` set it). Without the label, sandbox creation is denied
+  (`fail_closed`).
+- Each SAW's prepare Job gets a Role in the shared namespace to create the
+  golden image DataSource there on first use; cloning it into the SAW
+  namespace is allowed by the gateway image chart.
+- Quickstart: `make openshell-saw-create OPENSHELL_SAW_NAME=alice` deploys
+  into `saw-alice`; override with `SAW_NS=...`. Keycloak is looked up in
+  `KEYCLOAK_NS` (default `keycloak`). `make openshell-saw-delete` also
+  deletes the namespace if it carries the SAW label.
+- Pattern: `values-prod.yaml` puts Keycloak/RHBK in `keycloak` and the
+  default user's SAW (`openshell-saw`, `saw-bom`, `pattern-secrets`) in
+  `saw-alice`. Add a namespace + those three applications per user.
+
 ## Authentication
 
 | Who | How | Role |
@@ -105,6 +131,9 @@ make test-installer        # installer + chart tests; chart tests need helm
 - Reporting status to the cluster beyond the optional readiness probe
   (`vm.readinessProbe: true`, needs guest-agent exec).
 - Docker as the VM container runtime.
+- Moving an existing pattern install's Keycloak from `openshell-agents` to
+  `keycloak`: the new instance starts with a fresh database (realm, test
+  users and clients come from the chart; other data is not migrated).
 - Migrating VMs created by the old SSH-based chart in place: cloud-init has
   already run on them, so the installer units are never written. Recreate
   the VM (delete the VM and its `-root` DataVolume) after upgrading the chart.

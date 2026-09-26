@@ -32,7 +32,7 @@ spec:
         sourceRef:
           kind: DataSource
           name: {{ include "openshell-sandbox.dataSourceName" . }}
-          namespace: {{ .Values.source.dataSourceNamespace | default .Release.Namespace }}
+          namespace: {{ include "openshell-sandbox.goldenNamespace" . }}
         {{- end }}
         storage:
           accessModes:

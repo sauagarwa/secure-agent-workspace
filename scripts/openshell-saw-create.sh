@@ -3,13 +3,18 @@
 #
 # Required env vars: OPENSHELL_SAW_NAME, SSH_PUBKEY, SAW_CHART
 # Required env vars (provider): PROVIDER + MODEL + API_KEY, or GCP_SA_JSON
-# Optional: OWNER, OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_TOKEN_DIR, NS,
-#           AGENT, ENDPOINT_URL, WEB_SEARCH, NAMESPACE_MODE, SCRIPTS_DIR
+# Optional: OWNER, OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_TOKEN_DIR, NS, SAW_NS,
+#           KEYCLOAK_NS, AGENT, ENDPOINT_URL, WEB_SEARCH, SCRIPTS_DIR
+#
+# Each SAW gets its own namespace (SAW_NS, default saw-<name>). The shared
+# namespace NS keeps the golden image and the governance interceptor.
 
 set -euo pipefail
 
 NS="${NS:-openshell-agents}"
 OPENSHELL_SAW_NAME="${OPENSHELL_SAW_NAME:?OPENSHELL_SAW_NAME is required}"
+SAW_NS="${SAW_NS:-saw-${OPENSHELL_SAW_NAME}}"
+KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
 if (( ${#OPENSHELL_SAW_NAME} > 19 )); then
   echo "ERROR: OPENSHELL_SAW_NAME '${OPENSHELL_SAW_NAME}' is ${#OPENSHELL_SAW_NAME} characters — OpenShell enforces a 19-character maximum." >&2
   exit 1
@@ -28,7 +33,7 @@ OIDC_ISSUER="${OIDC_ISSUER:-}"
 OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-openshell-cli}"
 OIDC_TOKEN_DIR="${OIDC_TOKEN_DIR:-$HOME/.config/openshell/oidc}"
 OWNER="${OWNER:-}"
-NAMESPACE_MODE="${NAMESPACE_MODE:-shared}"
+OWNER_SUBJECT="${OWNER_SUBJECT:-}"
 SCRIPTS_DIR="${SCRIPTS_DIR:-scripts}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 GOVERNANCE_ENABLED="${GOVERNANCE_ENABLED:-true}"
@@ -61,6 +66,10 @@ if [[ -z "${OWNER}" ]]; then
     exit 1
   fi
 
+  # The token's subject is the identity OpenShell uses for workspace
+  # membership; the installer makes it admin of the SAW's workspaces.
+  OWNER_SUBJECT=$(jq -r '.access_token // empty' "${OIDC_TOKEN_DIR}/token.json" 2>/dev/null \
+    | python3 -c "import sys,base64,json; t=sys.stdin.read().strip().split('.')[1]; t+='='*(4-len(t)%4); print(json.loads(base64.urlsafe_b64decode(t)).get('sub',''))" 2>/dev/null || true)
   printf "Logged in as '\033[1m%s\033[0m'\n" "${KC_USER}"
   printf "Press Enter to set owner to '%s', or type a different owner: " "${KC_USER}"
   read -r INPUT_OWNER
@@ -73,10 +82,10 @@ fi
 
 # --- Detect OIDC issuer ---
 if [[ -z "${OIDC_ISSUER}" ]]; then
-  KC_HOST=$(oc get keycloak --all-namespaces -o jsonpath='{.items[0].status.externalURL}' 2>/dev/null \
+  KC_HOST=$(oc get keycloak openshell-keycloak -n "${KEYCLOAK_NS}" -o jsonpath='{.status.externalURL}' 2>/dev/null \
     | sed 's|^https://||;s|/$||' || true)
   if [[ -z "${KC_HOST}" ]]; then
-    KC_HOST=$(oc get route --all-namespaces -l app=keycloak -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true)
+    KC_HOST=$(oc get route -n "${KEYCLOAK_NS}" -l app=keycloak -o jsonpath='{.items[0].spec.host}' 2>/dev/null || true)
   fi
   if [[ -n "${KC_HOST}" ]]; then
     OIDC_ISSUER="https://${KC_HOST}/realms/openshell"
@@ -91,12 +100,13 @@ if [[ -n "${OIDC_ISSUER}" ]]; then
   OIDC_OPTS="--set oidc.issuerUrl=${OIDC_ISSUER} --set oidc.clientId=${OIDC_CLIENT_ID}"
 fi
 
-# --- Namespace ---
-DEPLOY_NS="${NS}"
-if [[ "${NAMESPACE_MODE}" == "perUser" ]]; then
-  DEPLOY_NS="saw-$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-58)"
-  oc create namespace "${DEPLOY_NS}" --dry-run=client -o yaml | oc apply -f - 2>/dev/null
-fi
+# --- Namespace: one per SAW ---
+DEPLOY_NS="${SAW_NS}"
+oc create namespace "${DEPLOY_NS}" --dry-run=client -o yaml | oc apply -f - >/dev/null
+# The label lets the shared governance interceptor accept this SAW's VM.
+oc label namespace "${DEPLOY_NS}" openshell.pattern/saw=true \
+  ${OWNER:+openshell.pattern/owner="$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g' | cut -c1-63)"} \
+  --overwrite >/dev/null
 
 # --- Compute route hostname ---
 ROUTE_HOST=""
@@ -135,7 +145,10 @@ helm upgrade --install "${OPENSHELL_SAW_NAME}" "${SAW_CHART}" \
   ${GCP_SA_JSON:+--set-file vertexSaJson="${GCP_SA_JSON}"} \
   ${OIDC_OPTS} \
   --set accessControl.owner="${OWNER}" \
-  --set namespaceMode="${NAMESPACE_MODE}" \
+  ${OWNER_SUBJECT:+--set-string accessControl.ownerSubject="${OWNER_SUBJECT}"} \
+  --set oidc.keycloakNamespace="${KEYCLOAK_NS}" \
+  --set governance.namespace="${NS}" \
+  --set source.dataSourceNamespace="${NS}" \
   --set containerRuntime="${CONTAINER_RUNTIME}" \
   --set governance.enabled="${GOVERNANCE_ENABLED}" \
   --set route.enabled=true --set route.dashboard=true \

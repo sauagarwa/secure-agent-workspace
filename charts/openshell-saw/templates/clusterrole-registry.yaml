@@ -1,7 +1,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "openshell-sandbox.fullname" . }}-registry-reader
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-registry-reader
   labels:
     {{- include "openshell-sandbox.labels" . | nindent 4 }}
 rules:
@@ -13,7 +13,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "openshell-sandbox.fullname" . }}-registry-reader
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-registry-reader
   labels:
     {{- include "openshell-sandbox.labels" . | nindent 4 }}
 subjects:
@@ -23,4 +23,4 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "openshell-sandbox.fullname" . }}-registry-reader
+  name: {{ include "openshell-sandbox.fullname" . }}-{{ .Release.Namespace }}-registry-reader
