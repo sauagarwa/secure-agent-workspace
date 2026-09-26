@@ -1,5 +1,5 @@
 {{/*
-Grants the setup Job's ServiceAccount read access to the Keycloak initial-admin
+Grants the prepare Job's ServiceAccount read access to the Keycloak initial-admin
 Secret, possibly in a different namespace than this sandbox. Needed so the Job
 can register this sandbox's exact webui redirect URI onto the shared
 openshell-dashboard client via the Keycloak Admin API (Keycloak's redirect URI
@@ -30,7 +30,7 @@ metadata:
     {{- include "openshell-sandbox.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "openshell-sandbox.fullname" . }}-setup
+    name: {{ include "openshell-sandbox.fullname" . }}-prepare
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: Role

@@ -86,12 +86,9 @@ fi
 # --- Build OIDC helm options ---
 OIDC_OPTS=""
 if [[ -n "${OIDC_ISSUER}" ]]; then
+  # The gateway only needs the issuer. Your own token stays on your machine;
+  # the VM's installer uses its local mTLS identity instead.
   OIDC_OPTS="--set oidc.issuerUrl=${OIDC_ISSUER} --set oidc.clientId=${OIDC_CLIENT_ID}"
-  OIDC_TOKEN=$(OIDC_TOKEN_DIR="${OIDC_TOKEN_DIR}" OIDC_CLIENT_ID="${OIDC_CLIENT_ID}" \
-    OIDC_ISSUER="${OIDC_ISSUER}" NS="${NS}" "${SCRIPTS_DIR}/oidc-login.sh" token 2>/dev/null || true)
-  if [[ -n "${OIDC_TOKEN}" ]]; then
-    OIDC_OPTS="${OIDC_OPTS} --set-string oidc.token=${OIDC_TOKEN}"
-  fi
 fi
 
 # --- Namespace ---
@@ -109,6 +106,18 @@ if [[ -n "${APPS_DOMAIN}" ]]; then
   ROUTE_HOST="${OPENSHELL_SAW_NAME}-gateway-${DEPLOY_NS}.${APPS_DOMAIN}"
 fi
 
+# --- Provider credential Secret ---
+# The VM's installer reads provider keys only from mounted Secrets, so the
+# key goes into the "inference" Secret instead of the Helm release values.
+if [[ -n "${API_KEY}" ]]; then
+  oc create secret generic inference -n "${DEPLOY_NS}" \
+    --from-literal=api_key="${API_KEY}" \
+    ${PROVIDER:+--from-literal=provider="${PROVIDER}"} \
+    ${MODEL:+--from-literal=model="${MODEL}"} \
+    --dry-run=client -o yaml | oc apply -f - >/dev/null
+  echo "Secret 'inference' updated in ${DEPLOY_NS}."
+fi
+
 # --- Deploy ---
 echo "Provisioning sandbox '${OPENSHELL_SAW_NAME}' for owner '${OWNER}' in namespace '${DEPLOY_NS}'..."
 
@@ -121,7 +130,6 @@ helm upgrade --install "${OPENSHELL_SAW_NAME}" "${SAW_CHART}" \
   --set agent="${AGENT}" \
   --set inference.provider="${PROVIDER}" \
   --set inference.model="${MODEL}" \
-  --set inference.apiKey="${API_KEY}" \
   --set inference.endpointUrl="${ENDPOINT_URL}" \
   --set inference.webSearch="${WEB_SEARCH}" \
   ${GCP_SA_JSON:+--set-file vertexSaJson="${GCP_SA_JSON}"} \
@@ -131,7 +139,9 @@ helm upgrade --install "${OPENSHELL_SAW_NAME}" "${SAW_CHART}" \
   --set containerRuntime="${CONTAINER_RUNTIME}" \
   --set governance.enabled="${GOVERNANCE_ENABLED}" \
   --set route.enabled=true --set route.dashboard=true \
-  ${ROUTE_HOST:+--set route.host="${ROUTE_HOST}"}
+  ${ROUTE_HOST:+--set route.host="${ROUTE_HOST}"} \
+  ${APPS_DOMAIN:+--set route.webuiHost="${OPENSHELL_SAW_NAME}-webui-${DEPLOY_NS}.${APPS_DOMAIN}"} \
+  ${APPS_DOMAIN:+--set route.dashboardHost="${OPENSHELL_SAW_NAME}-dashboard-${DEPLOY_NS}.${APPS_DOMAIN}"}
 
 echo ""
 echo "Sandbox '${OPENSHELL_SAW_NAME}' deployed."

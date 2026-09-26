@@ -1,3 +1,9 @@
+{{- include "openshell-sandbox.validateSandboxName" (.Values.sandboxName | default .Release.Name) }}
+{{- if ne .Values.containerRuntime "podman" }}
+{{- fail "containerRuntime: the in-guest installer supports podman only" }}
+{{- end }}
+{{- $secrets := include "openshell-sandbox.providerSecrets" . | fromJsonArray }}
+{{- range $secrets }}{{- include "openshell-sandbox.validateSecretName" . }}{{- end }}
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -39,6 +45,11 @@ spec:
       labels:
         {{- include "openshell-sandbox.labels" . | nindent 8 }}
         openshell.pattern/role: gateway
+      annotations:
+        # Input changes (BOM, installer, cloud-init) change the VM spec, so
+        # KubeVirt flags the VM RestartRequired. The disks are read at boot.
+        openshell.pattern/installer-checksum: {{ include (print $.Template.BasePath "/configmap-installer.yaml") . | sha256sum | trunc 16 | quote }}
+        openshell.pattern/cloudinit-checksum: {{ include (print $.Template.BasePath "/secret-cloudinit.yaml") . | sha256sum | trunc 16 | quote }}
     spec:
       domain:
         cpu:
@@ -54,6 +65,20 @@ spec:
             - name: cloudinitdisk
               disk:
                 bus: virtio
+            - name: saw-installer
+              serial: saw-installer
+              disk:
+                bus: virtio
+            - name: saw-profiles
+              serial: saw-profiles
+              disk:
+                bus: virtio
+            {{- range $i, $name := $secrets }}
+            - name: saw-sec-{{ $i }}
+              serial: saw-sec-{{ $i }}
+              disk:
+                bus: virtio
+            {{- end }}
           interfaces:
             - name: default
               masquerade: {}
@@ -77,6 +102,15 @@ spec:
         features:
           acpi: {}
           smm: {}
+      {{- if .Values.vm.readinessProbe }}
+      readinessProbe:
+        exec:
+          command: ["test", "-f", "/var/lib/saw/ready"]
+        initialDelaySeconds: 60
+        periodSeconds: 15
+        timeoutSeconds: 5
+        failureThreshold: 3
+      {{- end }}
       networks:
         - name: default
           pod: {}
@@ -88,3 +122,16 @@ spec:
           cloudInitNoCloud:
             secretRef:
               name: {{ include "openshell-sandbox.fullname" . }}-cloudinit
+        - name: saw-installer
+          configMap:
+            name: {{ include "openshell-sandbox.fullname" . }}-installer
+        - name: saw-profiles
+          configMap:
+            name: saw-bom-profiles
+            optional: true
+        {{- range $i, $name := $secrets }}
+        - name: saw-sec-{{ $i }}
+          secret:
+            secretName: {{ $name }}
+            optional: true
+        {{- end }}

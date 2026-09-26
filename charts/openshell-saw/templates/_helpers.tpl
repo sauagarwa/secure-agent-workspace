@@ -107,3 +107,117 @@ Priority: explicit sshPublicKey > global.sshPublicKey.
   {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Hostname of an auxiliary route (webui/dashboard). Priority: explicit value >
+computed from global.clusterDomain (OpenShift's default <name>-<ns>.apps.<domain>).
+Call with (list $ "webui" .Values.route.webuiHost).
+*/}}
+{{- define "openshell-sandbox.auxRouteHost" -}}
+{{- $root := index . 0 -}}
+{{- $suffix := index . 1 -}}
+{{- $explicit := index . 2 -}}
+{{- if $explicit -}}
+  {{- $explicit -}}
+{{- else if $root.Values.global -}}
+  {{- if $root.Values.global.clusterDomain -}}
+    {{- printf "%s-%s-%s.apps.%s" (include "openshell-sandbox.fullname" $root) $suffix $root.Release.Namespace $root.Values.global.clusterDomain -}}
+  {{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Governance interceptor gRPC endpoint reachable from the VM.
+*/}}
+{{- define "openshell-sandbox.governanceEndpoint" -}}
+{{- .Values.governance.endpoint | default (printf "http://governance-interceptor.%s.svc.cluster.local:%v" .Release.Namespace (.Values.governance.port | default 18081)) -}}
+{{- end }}
+
+{{/*
+Provider credential Secrets attached to the VM, de-duplicated, as JSON list.
+*/}}
+{{- define "openshell-sandbox.providerSecrets" -}}
+{{- $names := list -}}
+{{- if .Values.inference.secretName -}}{{- $names = append $names .Values.inference.secretName -}}{{- end -}}
+{{- range .Values.additionalProviderSecrets -}}
+  {{- if and . (not (has . $names)) -}}{{- $names = append $names . -}}{{- end -}}
+{{- end -}}
+{{- toJson $names -}}
+{{- end }}
+
+{{/*
+Gateway environment file. Written by cloud-init on first boot (the golden
+image's first-boot setup copies it) and re-synced by the installer on every
+boot, so later chart changes reach existing VMs after a restart.
+*/}}
+{{- define "openshell-sandbox.gatewayEnv" -}}
+{{- $routeHost := include "openshell-sandbox.routeHost" . -}}
+OPENSHELL_BIND_ADDRESS={{ .Values.openshell.bindAddress | quote }}
+OPENSHELL_SERVER_PORT=17670
+OPENSHELL_DRIVERS=podman
+OPENSHELL_SSH_GATEWAY_PORT=17670
+OPENSHELL_TLS_CERT=/home/cloud-user/.local/state/openshell/tls/server/tls.crt
+OPENSHELL_TLS_KEY=/home/cloud-user/.local/state/openshell/tls/server/tls.key
+OPENSHELL_TLS_CLIENT_CA=/home/cloud-user/.local/state/openshell/tls/ca.crt
+OPENSHELL_CONFIG_FILE=/etc/openshell/gateway.toml
+# The in-VM installer authenticates with the local mTLS client
+# certificate. End users authenticate with OIDC bearer tokens.
+OPENSHELL_ENABLE_MTLS_AUTH=true
+{{- if $routeHost }}
+OPENSHELL_ROUTE_FQDN={{ $routeHost }}
+{{- end }}
+{{- end }}
+
+{{/*
+Gateway TOML: OIDC for users (roles from the token), podman supervisor image
+from the BOM, governance interceptor.
+*/}}
+{{- define "openshell-sandbox.gatewayToml" -}}
+{{- $oidcIssuer := include "openshell-sandbox.oidcIssuerUrl" . -}}
+{{- if $oidcIssuer }}
+[openshell.gateway.oidc]
+issuer = {{ $oidcIssuer | quote }}
+audience = {{ .Values.oidc.clientId | quote }}
+roles_claim = {{ .Values.oidc.rolesClaim | quote }}
+admin_role = {{ .Values.oidc.adminRole | quote }}
+user_role = {{ .Values.oidc.userRole | quote }}
+
+[openshell.gateway.auth]
+allow_unauthenticated_users = false
+
+{{ end -}}
+[openshell.drivers.podman]
+supervisor_image = {{ .Values.bom.spec.openshell.supervisor.image | quote }}
+{{- if .Values.governance.enabled }}
+
+[openshell.gateway]
+provider_profile_sources = [
+  { type = "interceptor", name = "governance" },
+]
+
+[[openshell.gateway.interceptors]]
+name           = "governance"
+grpc_endpoint  = {{ include "openshell-sandbox.governanceEndpoint" . | quote }}
+allow_insecure_transport = {{ .Values.governance.allowInsecureTransport }}
+order          = 10
+failure_policy = {{ .Values.governance.failurePolicy | quote }}
+binding_policy = "allowlist"
+timeout        = {{ .Values.governance.timeout | quote }}
+
+[[openshell.gateway.interceptors.bindings]]
+rpc = "openshell.v1.OpenShell/CreateSandbox"
+phases = ["modify_operation", "validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc = "openshell.v1.OpenShell/CreateProvider"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc = "openshell.v1.OpenShell/UpdateConfig"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc = "openshell.v1.OpenShell/SubmitPolicyAnalysis"
+phases = ["validate"]
+{{- end }}
+{{- end }}

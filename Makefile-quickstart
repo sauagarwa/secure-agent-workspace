@@ -116,7 +116,7 @@ SSH_PUBKEY = $(shell cat "$(SSH_KEY_PATH).pub" 2>/dev/null)
         build-nemoclaw build-nemoclaw-cli build-openclaw-openshell build-openclaw-openshell-local \
         build-gateway-docker build-gateway-podman copy-images \
         keycloak keycloak-issuer login whoami logout delete-keycloak \
-        openshell-saw-create openshell-saw-list openshell-saw-logs openshell-saw-ssh ssh-secret \
+        openshell-saw-create openshell-saw-list openshell-saw-logs openshell-saw-status openshell-saw-restart openshell-saw-ssh ssh-secret \
         openshell-saw-configure-gateway openshell-saw-tui openshell-saw-gui test \
         openshell-saw-delete sandbox-pre-delete delete-all status \
         governance-list-profiles governance-add-profile governance-remove-profile governance-create-profile governance-demo \
@@ -301,7 +301,7 @@ sandbox-pre-delete: .check-saw-name
 	@echo "Cleaning up heavy resources for '$(OPENSHELL_SAW_NAME)' before uninstall..."
 	-@oc delete vm $(OPENSHELL_SAW_NAME) -n $(NS) --wait=false 2>/dev/null
 	-@oc delete dv $(OPENSHELL_SAW_NAME)-root -n $(NS) --wait=false 2>/dev/null
-	-@oc delete job $(OPENSHELL_SAW_NAME)-setup -n $(NS) --wait=false 2>/dev/null
+	-@oc delete job $(OPENSHELL_SAW_NAME)-prepare -n $(NS) --wait=false 2>/dev/null
 	@echo "Heavy resources for '$(OPENSHELL_SAW_NAME)' scheduled for deletion."
 
 # --- Keycloak / OIDC ---
@@ -416,8 +416,14 @@ openshell-saw-list: ## List all sandboxes
 			printf "%-20s %-12s %-10s %s\n" "$$name" "$$status" "$$vm" "$$created"; \
 		done
 
-openshell-saw-logs: .check-saw-name ## Follow sandbox setup Job logs
-	oc -n $(NS) logs -f job/$(OPENSHELL_SAW_NAME)-setup
+openshell-saw-logs: .check-saw-name ## Follow the in-VM installer (serial console)
+	oc -n $(NS) logs -f -l vm.kubevirt.io/name=$(OPENSHELL_SAW_NAME) -c guest-console-log --tail=-1
+
+openshell-saw-status: .check-saw-name ## Show the in-VM installer status (needs sshPublicKey)
+	virtctl -n $(NS) ssh cloud-user@vm/$(OPENSHELL_SAW_NAME) --command 'cat /var/lib/saw/status.json'
+
+openshell-saw-restart: .check-saw-name ## Restart the VM so it applies a changed BOM/profile
+	virtctl -n $(NS) restart $(OPENSHELL_SAW_NAME)
 
 openshell-saw-ssh: .check-saw-name .check-gateway-ca ## SSH into a sandbox
 	@ssh -o "ProxyCommand=openshell ssh-proxy --gateway-name $(OPENSHELL_SAW_NAME) --name $(OPENSHELL_SAW_NAME) " \
@@ -541,3 +547,9 @@ status: ## Show status of all OpenShell resources
 	@echo "" && echo "=== ImageStreams ===" && oc -n $(NS) get is 2>/dev/null || true
 	@echo "" && echo "=== Builds ===" && oc -n $(NS) get builds 2>/dev/null || true
 	@echo "" && echo "=== Jobs ===" && oc -n $(NS) get jobs 2>/dev/null || true
+
+# --- In-guest installer tests (no cluster needed) ---
+PYTHON ?= python3
+.PHONY: test-installer
+test-installer: ## Run installer + chart tests (chart tests need helm on PATH)
+	$(PYTHON) -m pytest -q -p no:cacheprovider tests/installer tests/charts cli/tests/test_kube.py

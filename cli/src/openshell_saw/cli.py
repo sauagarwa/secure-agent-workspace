@@ -172,7 +172,7 @@ def sandbox_create(ctx, name, owner, namespace_mode, provider, model, api_key,
     if owner:
         click.echo(f"  Owner:     {owner}")
 
-    click.echo(f"\nMonitor setup:  openshell-saw sandbox logs {name}")
+    click.echo(f"\nFollow the in-VM installer:  openshell-saw sandbox logs {name}")
     click.echo(f"SSH (debug):    openshell-saw sandbox ssh {name}")
 
 
@@ -214,8 +214,8 @@ def sandbox_ssh(ctx, name):
 @click.argument("name")
 @click.pass_context
 def sandbox_logs(ctx, name):
-    """Follow sandbox setup job logs."""
-    kube.follow_logs(f"job/{name}-setup", ctx.obj["cfg"]["namespace"])
+    """Follow the in-guest installer (VM serial console)."""
+    kube.follow_vm_console(name, ctx.obj["cfg"]["namespace"])
 
 
 @sandbox.command("url")

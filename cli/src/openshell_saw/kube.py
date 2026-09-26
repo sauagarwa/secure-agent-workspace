@@ -121,6 +121,17 @@ def follow_logs(resource, namespace):
     )
 
 
+def follow_vm_console(vm_name, namespace):
+    """Follow a VM's serial console, where the in-guest installer logs."""
+    sys.exit(
+        subprocess.run(
+            ["oc", "-n", namespace, "logs", "-f",
+             "-l", f"vm.kubevirt.io/name={vm_name}",
+             "-c", "guest-console-log", "--tail=-1"]
+        ).returncode
+    )
+
+
 def start_build(name, namespace, follow=True):
     """Start an OpenShift build."""
     cmd = ["oc", "start-build", name, "-n", namespace]
