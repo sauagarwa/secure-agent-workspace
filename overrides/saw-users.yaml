@@ -2,6 +2,3 @@ users:
   - name: alice
     profiles:
       - data-science
-  - name: bob
-  - name: carol
-    pruneOnRemove: true
