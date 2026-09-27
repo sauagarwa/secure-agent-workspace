@@ -619,3 +619,45 @@ def test_secret_template_matches_the_default_profile():
         assert p["credentialSecretKey"] in fields, p["name"]
         configured = fields.get("provider", {}).get("value")
         assert configured in (p["type"], p.get("nemoclawProvider")), (p["name"], configured)
+
+
+def test_custom_inference_profile_validates_in_the_shipped_installer(tmp_path):
+    """saw-bom `profiles: [custom-inference]` with an `inference` Secret for a
+    custom OpenAI-compatible endpoint (provider/model/url/api_key)."""
+    values = tmp_path / "saw-bom.yaml"
+    values.write_text("profiles: [custom-inference]\n")
+    result = helm_template(BOM_CHART, "-f", str(values))
+    assert result.returncode == 0, result.stderr
+    [cm] = [d for d in yaml.safe_load_all(result.stdout) if d]
+    assert all("__custom-inference__" in k for k in cm["data"])
+    docs = render("-f", str(ROOT / "overrides" / "openshell-saw.yaml"))
+    run_saw = tmp_path / "run-saw"
+    for key, value in installer_data(docs).items():
+        (run_saw / "installer").mkdir(parents=True, exist_ok=True)
+        (run_saw / "installer" / key).write_text(value)
+    for key, value in cm["data"].items():
+        (run_saw / "profiles").mkdir(exist_ok=True)
+        (run_saw / "profiles" / key).write_text(value)
+    for secret, data in {"inference": {"api_key": "k1", "provider": "custom", "model": "m",
+                                       "url": "https://vllm.models.svc:8443/v1"},
+                         "web-search": {"api_key": "k2"}}.items():
+        (run_saw / "secrets" / secret).mkdir(parents=True)
+        for key, value in data.items():
+            (run_saw / "secrets" / secret / key).write_text(value)
+    result = subprocess.run([sys.executable, str(run_saw / "installer" / "apply_bom.py"),
+                             "validate", "--inputs", str(run_saw)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 workspace(s) ['default']" in result.stdout
+
+
+def test_inference_secret_carries_an_optional_url():
+    """The ExternalSecret reads every key of the Vault entry; `url` is
+    optional so cloud-provider entries without it keep working."""
+    result = helm_template(ROOT / "charts" / "pattern-secrets")
+    assert result.returncode == 0, result.stderr
+    es = next(d for d in yaml.safe_load_all(result.stdout) if d and d["metadata"]["name"] == "inference")
+    assert es["spec"]["dataFrom"] == [{"extract": {"key": "secret/data/hub/inference"}}]
+    assert "data" not in es["spec"]
+    tmpl = es["spec"]["target"]["template"]["data"]
+    assert set(tmpl) == {"provider", "model", "api_key", "url"}
+    assert tmpl["url"] == '{{ index . "url" | default "" }}'

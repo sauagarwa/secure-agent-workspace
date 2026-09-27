@@ -44,6 +44,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -96,6 +97,14 @@ PROVIDER_CRED_MAP = {
     "tavily": "TAVILY_API_KEY",
 }
 SANDBOX_TYPES = {"generic", "openclaw", "nemoclaw"}
+# Provider config key that holds the upstream base URL for OpenShell's
+# inference router (openshell-core inference profiles). An `openai` provider
+# with OPENAI_BASE_URL reaches any OpenAI-compatible server (vLLM, Ollama, ...).
+BASE_URL_CONFIG_KEYS = {
+    "openai": "OPENAI_BASE_URL",
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "nvidia": "NVIDIA_BASE_URL",
+}
 
 
 class InstallerError(Exception):
@@ -319,6 +328,13 @@ class Provider:
     credential_secret: str = ""
     credential_secret_key: str = "api_key"
     model: str = ""
+    # Secret keys the base URL and the model are read from (optional).
+    base_url_secret_key: str = ""
+    model_secret_key: str = ""
+    # Other values of the Secret's `provider` key that select this provider.
+    secret_provider: str = ""
+    inference_timeout: int = 0
+    base_url: str = ""
 
 
 @dataclass
@@ -411,7 +427,11 @@ def parse_profiles(files):
                         nemoclaw_provider=p.get("nemoclawProvider", ""),
                         credential_secret=p.get("credentialSecret", ""),
                         credential_secret_key=p.get("credentialSecretKey", "api_key"),
-                        model=p.get("model", "")))
+                        model=p.get("model", ""),
+                        base_url_secret_key=p.get("baseUrlSecretKey", ""),
+                        model_secret_key=p.get("modelSecretKey", ""),
+                        secret_provider=p.get("secretProvider", ""),
+                        inference_timeout=int(p.get("inferenceTimeout", 0) or 0)))
             if "sandbox.yaml" in docs:
                 key, text = docs["sandbox.yaml"]
                 for s in (_yaml(text, key).get("spec") or {}).get("sandboxes") or []:
@@ -461,6 +481,15 @@ def validate_profiles(profiles):
                 errors.append(f"{where}: provider '{p.name}' has an invalid credentialSecret name")
             if not SECRET_KEY_RE.match(p.credential_secret_key or ""):
                 errors.append(f"{where}: provider '{p.name}' has an invalid credentialSecretKey")
+            for field_name, value in (("baseUrlSecretKey", p.base_url_secret_key),
+                                      ("modelSecretKey", p.model_secret_key)):
+                if value and not SECRET_KEY_RE.match(value):
+                    errors.append(f"{where}: provider '{p.name}' has an invalid {field_name}")
+            if p.base_url_secret_key and p.type not in BASE_URL_CONFIG_KEYS:
+                errors.append(f"{where}: provider '{p.name}' of type '{p.type}' does not take a base URL "
+                              f"(supported: {', '.join(sorted(BASE_URL_CONFIG_KEYS))})")
+            if p.inference_timeout < 0:
+                errors.append(f"{where}: provider '{p.name}' has a negative inferenceTimeout")
         sandbox_names = set()
         for s in ws.sandboxes:
             if not s.enabled:
@@ -502,7 +531,7 @@ def check_provider_type(provider, configured):
     for. Refuse to hand, say, a Gemini key to an NVIDIA provider."""
     if not configured:
         return
-    valid = {v for v in (provider.type, provider.nemoclaw_provider) if v}
+    valid = {v for v in (provider.type, provider.nemoclaw_provider, provider.secret_provider) if v}
     if configured not in valid:
         raise InstallerError(
             f"provider '{provider.name}' expects a {' or '.join(sorted(valid))} "
@@ -535,8 +564,49 @@ def resolve_credentials(profiles, secrets_dir):
             type_file = base / "provider"
             configured = type_file.read_text(encoding="utf-8").strip() if type_file.is_file() else ""
             check_provider_type(p, configured)
+            if p.model_secret_key:
+                p.model = read_secret_value(base, p.model_secret_key) or p.model
+            if p.base_url_secret_key:
+                p.base_url = read_secret_value(base, p.base_url_secret_key)
+                if p.base_url:
+                    try:
+                        p.base_url = check_base_url(p.base_url)
+                    except ValueError as exc:
+                        raise InstallerError(f"provider '{p.name}' in workspace '{ws.name}': {exc} "
+                                             f"(Secret '{p.credential_secret}' key "
+                                             f"'{p.base_url_secret_key}')") from None
             creds.setdefault(ws.name, {})[p.name] = value
     return creds
+
+
+def read_secret_value(base, key):
+    try:
+        return (Path(base) / key).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def check_base_url(url):
+    """An http(s) base URL without credentials, query or fragment. The value
+    is not echoed in errors: a pasted URL may contain a token."""
+    try:
+        parts = urlsplit(url)
+        ok = (parts.scheme in ("http", "https") and parts.hostname
+              and parts.username is None and parts.password is None
+              and not parts.query and not parts.fragment
+              and not any(c.isspace() for c in url))
+        if ok:
+            parts.port  # raises ValueError on a bad port
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ValueError("base URL must be http(s)://host[:port][/path] without credentials, "
+                         "query or fragment")
+    host = parts.hostname
+    if host in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("base URL must not be localhost: the gateway, not the sandbox, "
+                         "calls it (use a cluster Service or Route host)")
+    return url.rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -989,8 +1059,12 @@ class ProfileApplier:
         credential = self.creds[ws.name][provider.name]
         env_name = PROVIDER_CRED_MAP[provider.type]
         env = {env_name: credential}
+        # OpenAI-compatible (and other) endpoints: the inference router reads
+        # the upstream base URL from the provider config.
+        config = (("--config", f"{BASE_URL_CONFIG_KEYS[provider.type]}={provider.base_url}")
+                  if provider.base_url else ())
         create = ("provider", "create", "--name", provider.name, "--type", provider.type,
-                  *ws_args(ws.name), "--credential", env_name)
+                  *ws_args(ws.name), "--credential", env_name, *config)
         created = self.cli(*create, env=env, ok_if_exists=True, check=False)
         if (not created.ok and NO_PROFILE_RE.search(created.out + " " + created.err)
                 and provider.type in self.provider_profiles):
@@ -1007,7 +1081,7 @@ class ProfileApplier:
                                  f"'{ws.name}' (openshell provider create failed)")
         if created.existed:
             updated = self.cli("provider", "update", provider.name, *ws_args(ws.name),
-                               "--credential", env_name, env=env, check=False)
+                               "--credential", env_name, *config, env=env, check=False)
             if not updated.ok:
                 log(f"WARN: could not refresh the credential of existing provider '{provider.name}'")
 
@@ -1031,14 +1105,15 @@ class ProfileApplier:
         if not chosen:
             return
         log(f"Inference for '{ws.name}': {chosen.name} / {chosen.model}")
+        timeout = ("--timeout", str(chosen.inference_timeout)) if chosen.inference_timeout else ()
         self.cli("inference", "set", "--provider", chosen.name, "--model", chosen.model,
-                 "--workspace", ws.name, "--no-verify")
+                 "--workspace", ws.name, *timeout, "--no-verify")
         # The system route must point at a provider in the 'default'
         # workspace (the gateway looks it up there), so only that workspace
         # sets it.
         if ws.name == SYSTEM_WORKSPACE:
             self.cli("inference", "set", "--system", "--provider", chosen.name,
-                     "--model", chosen.model, "--no-verify")
+                     "--model", chosen.model, *timeout, "--no-verify")
 
     # -- sandboxes -------------------------------------------------------
 
