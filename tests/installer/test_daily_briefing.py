@@ -103,6 +103,22 @@ def test_a_token_without_refresh_material_is_used_as_is(ab, briefing, briefing_s
     assert creds["cuda-dev"]["gmail"] == ab.REFRESH_BOOTSTRAP_CREDENTIAL
 
 
+def test_material_without_the_client_secret_is_not_refreshed(ab, briefing, briefing_secrets):
+    # The profiles require client_secret, so the gateway would refuse the
+    # refresh: with a token the provider is static, without one it is refused.
+    (briefing_secrets / "slack" / "client_secret").unlink()
+    (briefing_secrets / "slack" / "bot_token").write_text("xoxb-STATIC\n")
+    (briefing_secrets / "gmail" / "client_secret").unlink()
+    with pytest.raises(ab.InstallerError, match="'gmail' needs refresh material"):
+        ab.resolve_credentials(briefing, briefing_secrets)
+    (briefing_secrets / "gmail" / "access_token").write_text("ya29.STATIC\n")
+    creds = ab.resolve_credentials(briefing, briefing_secrets)
+    cuda = next(ws for ws in briefing[0].workspaces if ws.name == "cuda-dev")
+    assert {p.name: p.refresh_strategy for p in cuda.providers if p.name != "nvidia"} == {
+        "slack": "", "gmail": ""}
+    assert creds["cuda-dev"]["slack"] == "xoxb-STATIC" and creds["cuda-dev"]["gmail"] == "ya29.STATIC"
+
+
 def test_neither_material_nor_token_is_refused(ab, briefing, briefing_secrets):
     for key in REFRESH:
         (briefing_secrets / "gmail" / key).unlink()
