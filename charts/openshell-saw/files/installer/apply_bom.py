@@ -115,9 +115,12 @@ PROVIDER_CRED_MAP = {
 # Gateway-managed credential refresh (OpenShell `provider refresh`): the
 # strategy a SAW-BOM provider can ask for, and the material it reads from
 # the provider's Secret (key -> required). The material stays at the
-# gateway; the sandbox only ever sees the credential's placeholder.
+# gateway; the sandbox only ever sees the credential's placeholder. Required
+# here means required by the provider profiles that declare the refresh
+# (charts/governance-policy/profiles: Slack and Google both need the client
+# secret); the gateway refuses `refresh configure` without it.
 REFRESH_MATERIAL = {
-    "oauth2-refresh-token": {"client_id": True, "client_secret": False, "refresh_token": True},
+    "oauth2-refresh-token": {"client_id": True, "client_secret": True, "refresh_token": True},
 }
 # A refreshed provider needs some credential at creation; this one is
 # replaced by the first refresh (`provider refresh rotate`) right after.
