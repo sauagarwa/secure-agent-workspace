@@ -1330,3 +1330,10 @@ def test_the_ca_bundle_holds_every_source_found(tmp_path, monkeypatch):
     text = out.read_text()
     assert text.index("SYSTEM") < text.index("TRUSTED") < text.index("EXTRA")
     assert text.count("BEGIN CERTIFICATE") == 3
+
+
+def test_a_profile_that_needs_its_harness_registers_it(portal, monkeypatch):
+    monkeypatch.setenv("VAULT_KV_MOUNT", "secret")
+    catalog = {"daily-briefing": {"harnessRequired": True}, "data-science": {"harnessRequired": False}}
+    assert portal.registry_entry("carol", "daily-briefing", catalog=catalog)["harnessEnabled"] is True
+    assert "harnessEnabled" not in portal.registry_entry("carol", "data-science", catalog=catalog)
