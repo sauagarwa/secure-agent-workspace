@@ -358,3 +358,20 @@ def test_a_user_can_opt_into_the_demo_harness(tmp_path):
     docs = docs_from(render_file(tmp_path, [dict(ALICE, harnessEnabled=True)]))
     assert helm_values(app(docs, "saw-alice-bom")) == {
         "profiles": ["data-science"], "harnessEnabled": True}
+
+
+def test_the_daily_briefing_profile_turns_its_harness_on(tmp_path):
+    """Its NemoClaw sandbox is for its bundle (harnessRequired): the user gets
+    harnessEnabled and allowDriverConfig without asking, and the Slack and
+    Gmail Secrets are synced and mounted."""
+    docs = docs_from(render_file(tmp_path, [{"name": "carol", "profiles": ["daily-briefing"]}, ALICE]))
+    assert helm_values(app(docs, "saw-carol-bom")) == {
+        "profiles": ["daily-briefing"], "harnessEnabled": True}
+    vm = helm_values(app(docs, "saw-carol"))
+    assert vm["allowDriverConfig"] is True
+    assert set(vm["additionalProviderSecrets"]) == {"web-search", "slack", "gmail"}
+    assert set(helm_values(app(docs, "saw-carol-secrets"))["secrets"]) == {
+        "inference", "web-search", "slack", "gmail"}
+    # data-science's demo bundle stays opt-in.
+    assert helm_values(app(docs, "saw-alice-bom")) == {"profiles": ["data-science"]}
+    assert "allowDriverConfig" not in helm_values(app(docs, "saw-alice"))
