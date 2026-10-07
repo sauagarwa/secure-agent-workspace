@@ -2,6 +2,10 @@
 NS             ?= openshell-agents
 BUILD_NS       ?= openshell-agents
 QUAY_REPO      ?= quay.io/rh-ai-quickstart
+# PUSH=false: the build-* targets keep the image in this cluster's internal
+# registry instead of pushing it to QUAY_REPO (e.g. an arm64 cluster building
+# its own images).
+PUSH           ?= true
 # Images `make copy-images` mirrors into the internal registry. Only the
 # gateway VM disk (golden image) is needed; the VM pulls sandbox and
 # NemoClaw CLI images from quay itself.
@@ -154,16 +158,24 @@ build-nemoclaw: ## Build NemoClaw sandbox image and push to quay (set OTEL=1 to 
 		--namespace $(BUILD_NS) --create-namespace \
 		$(if $(filter 1,$(OTEL)),--set build.otelEnabled=1)
 	oc start-build nemoclaw-sandbox -n $(BUILD_NS) --follow
-	@echo "Pushing nemoclaw-sandbox to $(QUAY_REPO)..."
-	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) nemoclaw-sandbox $(QUAY_REPO) $(OPENSHELL_VERSION)
+	@[ "$(PUSH)" != true ] || echo "Pushing nemoclaw-sandbox to $(QUAY_REPO)..."
+	@if [ "$(PUSH)" = true ]; then \
+		$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) nemoclaw-sandbox $(QUAY_REPO) $(OPENSHELL_VERSION); \
+	else \
+		echo "PUSH=false: nemoclaw-sandbox:latest stays in this cluster's internal registry ($(BUILD_NS))."; \
+	fi
 
 build-nemoclaw-cli: ## Build NemoClaw CLI image and push to quay
 	-@oc delete is nemoclaw-cli -n $(BUILD_NS) 2>/dev/null
 	helm upgrade --install nemoclaw-cli-imagestream $(HELM_DIR)nemoclaw-cli-imagestream \
 		--namespace $(BUILD_NS) --create-namespace
 	oc start-build nemoclaw-cli -n $(BUILD_NS) --follow
-	@echo "Pushing nemoclaw-cli to $(QUAY_REPO)..."
-	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) nemoclaw-cli $(QUAY_REPO) $(OPENSHELL_VERSION)
+	@[ "$(PUSH)" != true ] || echo "Pushing nemoclaw-cli to $(QUAY_REPO)..."
+	@if [ "$(PUSH)" = true ]; then \
+		$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) nemoclaw-cli $(QUAY_REPO) $(OPENSHELL_VERSION); \
+	else \
+		echo "PUSH=false: nemoclaw-cli:latest stays in this cluster's internal registry ($(BUILD_NS))."; \
+	fi
 
 # --- Governance interceptor image ---
 
@@ -198,8 +210,12 @@ build-gateway-docker: ## Build Docker gateway VM image and push to quay
 		--namespace $(BUILD_NS) --create-namespace $$GOLDEN_FLAG \
 		--set containerRuntime=docker
 	oc start-build openshell-gateway-docker -n $(BUILD_NS) --follow
-	@echo "Pushing openshell-gateway-docker to $(QUAY_REPO)..."
-	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) openshell-gateway-docker $(QUAY_REPO) $(OPENSHELL_VERSION)
+	@[ "$(PUSH)" != true ] || echo "Pushing openshell-gateway-docker to $(QUAY_REPO)..."
+	@if [ "$(PUSH)" = true ]; then \
+		$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) openshell-gateway-docker $(QUAY_REPO) $(OPENSHELL_VERSION); \
+	else \
+		echo "PUSH=false: openshell-gateway-docker:latest stays in this cluster's internal registry ($(BUILD_NS))."; \
+	fi
 
 build-gateway-podman: ## Build Podman gateway VM image and push to quay
 	@echo "Building Podman gateway image (openshell-gateway)..."
@@ -216,8 +232,12 @@ build-gateway-podman: ## Build Podman gateway VM image and push to quay
 		--namespace $(BUILD_NS) --create-namespace $$GOLDEN_FLAG \
 		--set containerRuntime=podman
 	oc start-build openshell-gateway -n $(BUILD_NS) --follow
-	@echo "Pushing openshell-gateway to $(QUAY_REPO)..."
-	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) openshell-gateway $(QUAY_REPO) $(OPENSHELL_VERSION)
+	@[ "$(PUSH)" != true ] || echo "Pushing openshell-gateway to $(QUAY_REPO)..."
+	@if [ "$(PUSH)" = true ]; then \
+		$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) openshell-gateway $(QUAY_REPO) $(OPENSHELL_VERSION); \
+	else \
+		echo "PUSH=false: openshell-gateway:latest stays in this cluster's internal registry ($(BUILD_NS))."; \
+	fi
 
 
 copy-images: ## Mirror pre-built images from quay to the internal registry (tries the version tag, then latest)

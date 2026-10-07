@@ -884,3 +884,11 @@ def test_bad_sandbox_ui_entries_fail_the_render(tmp_path, entry, message):
     values.write_text(yaml.safe_dump({"sandboxUi": [entry]}))
     result = helm_template(CHART, "--set", "sandboxName=saw-test", "-f", str(values))
     assert result.returncode != 0 and message in result.stderr
+
+
+def test_the_vm_runs_on_arm64_too(default_docs):
+    """UEFI without Secure Boot, and no smm: smm is x86-only (only needed for
+    Secure Boot), and KubeVirt on arm64 refuses it."""
+    domain = default_docs[("VirtualMachine", "saw-test")]["spec"]["template"]["spec"]["domain"]
+    assert domain["firmware"]["bootloader"]["efi"]["secureBoot"] is False
+    assert "smm" not in domain["features"]
