@@ -19,12 +19,11 @@ spec:
       profile:
         title: Profile
         type: string
-        enum: [custom-inference, daily-briefing, data-science]
+        enum: [custom-inference, data-science, personal-assistant]
         enumNames: ['custom-inference: Agent workspace backed by a custom OpenAI-compatible endpoint (vLLM,
-            Ollama, ...)', 'daily-briefing: Personal assistant: data science workspace with NVIDIA inference
-            and web search, and a daily Slack and Gmail briefing; NemoClaw assistant with NVIDIA inference
-            and a daily Slack and Gmail briefing', 'data-science: Data science workspace with NVIDIA inference
-            and web search; CUDA development workspace with NVIDIA inference']
+            Ollama, ...)', 'data-science: Data science workspace with NVIDIA inference and web search;
+            CUDA development workspace with NVIDIA inference', 'personal-assistant: Personal assistant:
+            NemoClaw agent with NVIDIA inference and a daily Slack and Gmail briefing']
         default: data-science
     dependencies:
       profile:
@@ -40,9 +39,18 @@ spec:
                 in Vault for your workspace only (provider brave)}
           required: [inference__api_key, inference__url, inference__model, web_search__api_key]
         - properties:
-            profile: {const: daily-briefing}
+            profile: {const: data-science}
             uiRoutes: {title: Sandbox web UIs, type: 'null', description: 'Published on their own route,
                 signed in with Keycloak, for you only: notebook (default), cuda-sandbox (cuda-dev)'}
+            inference__api_key: {title: 'inference: API key', type: string, 'ui:field': Secret, description: Stored
+                in Vault for your workspace only (provider nvidia)}
+            web_search__api_key: {title: 'web-search: API key', type: string, 'ui:field': Secret, description: Stored
+                in Vault for your workspace only (provider brave)}
+          required: [inference__api_key, web_search__api_key]
+        - properties:
+            profile: {const: personal-assistant}
+            uiRoutes: {title: Sandbox web UIs, type: 'null', description: 'Published on their own route,
+                signed in with Keycloak, for you only: assistant (personal-assistant)'}
             gmail__client_id: {title: 'gmail: OAuth client ID (for token refresh)', type: string}
             gmail__client_secret: {title: 'gmail: OAuth client secret (for token refresh)', type: string,
               'ui:field': Secret, description: Stored in Vault for your workspace only (provider gmail)}
@@ -61,18 +69,7 @@ spec:
                 only (provider slack)}
             slack__bot_token: {title: 'slack: Access token (only without a refresh token)', type: string,
               'ui:field': Secret, description: Stored in Vault for your workspace only (provider slack)}
-            web_search__api_key: {title: 'web-search: API key', type: string, 'ui:field': Secret, description: Stored
-                in Vault for your workspace only (provider brave)}
-          required: [inference__api_key, web_search__api_key]
-        - properties:
-            profile: {const: data-science}
-            uiRoutes: {title: Sandbox web UIs, type: 'null', description: 'Published on their own route,
-                signed in with Keycloak, for you only: notebook (default), cuda-sandbox (cuda-dev)'}
-            inference__api_key: {title: 'inference: API key', type: string, 'ui:field': Secret, description: Stored
-                in Vault for your workspace only (provider nvidia)}
-            web_search__api_key: {title: 'web-search: API key', type: string, 'ui:field': Secret, description: Stored
-                in Vault for your workspace only (provider brave)}
-          required: [inference__api_key, web_search__api_key]
+          required: [inference__api_key]
   steps:
   - id: request
     name: Submit the request

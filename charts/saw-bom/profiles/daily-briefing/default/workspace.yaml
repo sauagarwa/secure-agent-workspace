@@ -1,7 +1,0 @@
-apiVersion: saw.redhat.com/v1alpha1
-kind: Workspace
-metadata:
-  # Use "default" for the default workspace (always exists on the gateway).
-  # Set a custom name to create an additional workspace.
-  name: default
-  description: "Personal assistant: data science workspace with NVIDIA inference and web search, and a daily Slack and Gmail briefing"

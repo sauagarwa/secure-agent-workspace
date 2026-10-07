@@ -109,7 +109,7 @@ def catalog():
             # a key for another service; only set when it is unambiguous.
             entry["provider"] = entry["providers"][0] if len(entry["providers"]) == 1 else ""
         # A sandbox whose harness bundle is what it is for (harnessRequired,
-        # e.g. daily-briefing) needs harnessEnabled: saw-bom keeps the
+        # e.g. personal-assistant) needs harnessEnabled: saw-bom keeps the
         # harnessRef and openshell-saw allows the mount. saw-users and the
         # portal turn it on for the users of such a profile. An opt-in demo
         # bundle (data-science's ds-default) stays opt-in.

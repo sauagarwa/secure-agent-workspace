@@ -1,9 +1,12 @@
-# Daily briefing: Slack and Gmail in the NemoClaw sandbox
+# Personal assistant: a daily Slack and Gmail briefing
 
-The `daily-briefing` SAW-BOM profile gives a user the data-science workspace
-plus a `cuda-dev` workspace whose NemoClaw sandbox (`cuda-sandbox`) keeps a
-daily briefing of their Slack and Gmail messages. Asked to, the agent updates
-it every 5 minutes with whatever arrived since the last update.
+The `personal-assistant` SAW-BOM profile gives a user one workspace,
+`personal-assistant`, with a NemoClaw sandbox, `assistant`, that keeps a
+daily briefing of their Slack and Gmail messages. Its providers are NVIDIA
+(inference), Slack and Gmail; it has no web search. Asked to, the agent
+updates the briefing every 5 minutes with whatever arrived since the last
+update. For the whole demo, from install to the briefing, see
+[the personal assistant demo](personal-assistant-demo.md).
 
 What makes it safe to hand an agent the user's Slack and mail:
 
@@ -37,7 +40,7 @@ Harness bundles are mounted when a sandbox is created, and `nemoclaw onboard`
 cannot add a mount on podman. For a NemoClaw sandbox with a `harnessRef` the
 installer creates the sandbox itself, from the NemoClaw image with the
 bundle mounted, and configures OpenClaw in it, as it does after onboarding.
-A `cuda-sandbox` created earlier by `nemoclaw onboard` is created again once
+A NemoClaw sandbox created earlier by `nemoclaw onboard` is created again once
 (its `/sandbox` is not kept).
 
 ## Slack app (token rotation)
@@ -76,7 +79,7 @@ expire.
 users:
   - name: carol
     profiles:
-      - daily-briefing
+      - personal-assistant
 ```
 
 saw-users sees from the profile catalog that the sandbox needs its bundle
@@ -88,18 +91,19 @@ Load the keys into Vault: uncomment the `slack` and `gmail` entries in your
 `values-secret` file (see `values-secret.yaml.template`) and run
 `./pattern.sh make load-secrets`. They go to `secret/data/hub/slack` and
 `secret/data/hub/gmail` (or under the user's `vaultPrefix`). In the
-Developer Hub portal, the `daily-briefing` profile asks for the same fields.
+Developer Hub portal, the `personal-assistant` profile asks for the same
+fields and stores them under the user's own Vault path.
 
 Check on the VM, as the installer's identity:
 
 ```
-openshell provider refresh status gmail --workspace cuda-dev
-openshell provider refresh status slack --workspace cuda-dev
+openshell provider refresh status gmail --workspace personal-assistant
+openshell provider refresh status slack --workspace personal-assistant
 ```
 
 ## Demo
 
-In the cuda-sandbox's OpenClaw UI (its route) or TUI:
+In the assistant's OpenClaw UI (route `<user>-personal-assistant-assistant-ui`) or TUI:
 
 1. "Set up my daily briefing." The agent adds the `daily-briefing` cron job
    (every 5 minutes, isolated session), runs one update, and shows
@@ -109,7 +113,7 @@ In the cuda-sandbox's OpenClaw UI (its route) or TUI:
 3. "Print the Slack token." The agent only has a placeholder.
 4. Ask it to post to Slack, or to call another API: the profiles are
    read-only and list only Slack and Gmail. The sandbox log shows the denial
-   (`openshell logs cuda-sandbox --workspace cuda-dev --source sandbox`).
+   (`openshell logs assistant --workspace personal-assistant --source sandbox`).
 
 ## Limits
 
