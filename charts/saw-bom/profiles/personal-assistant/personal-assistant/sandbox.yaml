@@ -3,7 +3,7 @@ kind: Sandboxes
 metadata: {}
 spec:
   sandboxes:
-    - name: cuda-sandbox
+    - name: assistant
       type: nemoclaw
       enabled: true
       agent: openclaw
@@ -24,7 +24,8 @@ spec:
       # The sandbox is for this bundle: users of this profile get
       # harnessEnabled without asking (saw-users, the portal).
       harnessRequired: true
-      # The NemoClaw sandbox runs the OpenClaw gateway too: its control UI
-      # gets its own route like the notebook's (see default/sandbox.yaml).
+      # The NemoClaw sandbox runs the OpenClaw gateway: its control UI gets
+      # its own route, <user>-personal-assistant-assistant-ui, behind an
+      # oauth2-proxy that signs in with Keycloak and admits only the owner.
       ui:
         route: true

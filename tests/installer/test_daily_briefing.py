@@ -1,4 +1,4 @@
-"""The daily-briefing profile: Slack and Gmail providers whose access tokens
+"""The personal-assistant profile: Slack and Gmail providers whose access tokens
 the gateway refreshes, and the daily-briefing harness bundle on the NemoClaw
 sandbox."""
 import json
@@ -27,7 +27,7 @@ def briefing_secrets(secrets_dir):
 
 @pytest.fixture
 def briefing(ab):
-    return ab.parse_profiles(profile_files("daily-briefing"))
+    return ab.parse_profiles(profile_files("personal-assistant"))
 
 
 @pytest.fixture
@@ -55,7 +55,7 @@ def test_refresh_material_reaches_the_gateway_through_the_environment(
     applier(ab, config, creds, prune={"ledgerPath": str(ledger)}).apply(briefing)
     state = fake_env.openshell_state()
     for name, key in (("slack", "SLACK_BOT_TOKEN"), ("gmail", "GMAIL_ACCESS_TOKEN")):
-        provider = state["providers"][f"cuda-dev/{name}"]
+        provider = state["providers"][f"personal-assistant/{name}"]
         assert provider["refresh"][key] == {
             "strategy": "oauth2-refresh-token",
             "material": {k: f"{name}-{v}" for k, v in REFRESH.items()}}
@@ -65,7 +65,7 @@ def test_refresh_material_reaches_the_gateway_through_the_environment(
         assert value not in argv, "refresh material never goes through argv"
     assert len(calls(fake_env, "provider", "refresh", "configure")) == 2
     assert json.loads((tmp_path / "user" / "refresh.json").read_text()).keys() == {
-        "cuda-dev/slack", "cuda-dev/gmail"}
+        "personal-assistant/slack", "personal-assistant/gmail"}
 
 
 def test_unchanged_material_is_not_sent_again(ab, fake_env, config, briefing, briefing_secrets,
@@ -76,14 +76,14 @@ def test_unchanged_material_is_not_sent_again(ab, fake_env, config, briefing, br
     creds = ab.resolve_credentials(briefing, briefing_secrets)
     prune = {"ledgerPath": str(tmp_path / "user" / "managed.json")}
     applier(ab, config, creds, prune=prune).apply(briefing)
-    minted = fake_env.openshell_state()["providers"]["cuda-dev/gmail"]["credential"]
+    minted = fake_env.openshell_state()["providers"]["personal-assistant/gmail"]["credential"]
     applier(ab, config, creds, prune=prune).apply(briefing)
     assert len(calls(fake_env, "provider", "refresh", "configure")) == 2
-    assert fake_env.openshell_state()["providers"]["cuda-dev/gmail"]["credential"] == minted
+    assert fake_env.openshell_state()["providers"]["personal-assistant/gmail"]["credential"] == minted
     assert not [c for c in calls(fake_env, "provider", "update") if c[2] in ("slack", "gmail")]
     # New material in the Secret: configured again.
     (briefing_secrets / "gmail" / "refresh_token").write_text("1//new-refresh\n")
-    briefing = ab.parse_profiles(profile_files("daily-briefing"))
+    briefing = ab.parse_profiles(profile_files("personal-assistant"))
     creds = ab.resolve_credentials(briefing, briefing_secrets)
     applier(ab, config, creds, prune=prune).apply(briefing)
     configured = calls(fake_env, "provider", "refresh", "configure")
@@ -95,12 +95,12 @@ def test_a_token_without_refresh_material_is_used_as_is(ab, briefing, briefing_s
         (briefing_secrets / "slack" / key).unlink()
     (briefing_secrets / "slack" / "bot_token").write_text("xoxb-STATIC\n")
     creds = ab.resolve_credentials(briefing, briefing_secrets)
-    cuda = next(ws for ws in briefing[0].workspaces if ws.name == "cuda-dev")
-    slack = next(p for p in cuda.providers if p.name == "slack")
-    assert creds["cuda-dev"]["slack"] == "xoxb-STATIC" and slack.refresh_strategy == ""
-    gmail = next(p for p in cuda.providers if p.name == "gmail")
+    pa = next(ws for ws in briefing[0].workspaces if ws.name == "personal-assistant")
+    slack = next(p for p in pa.providers if p.name == "slack")
+    assert creds["personal-assistant"]["slack"] == "xoxb-STATIC" and slack.refresh_strategy == ""
+    gmail = next(p for p in pa.providers if p.name == "gmail")
     assert gmail.refresh_strategy == "oauth2-refresh-token"
-    assert creds["cuda-dev"]["gmail"] == ab.REFRESH_BOOTSTRAP_CREDENTIAL
+    assert creds["personal-assistant"]["gmail"] == ab.REFRESH_BOOTSTRAP_CREDENTIAL
 
 
 def test_material_without_the_client_secret_is_not_refreshed(ab, briefing, briefing_secrets):
@@ -113,10 +113,10 @@ def test_material_without_the_client_secret_is_not_refreshed(ab, briefing, brief
         ab.resolve_credentials(briefing, briefing_secrets)
     (briefing_secrets / "gmail" / "access_token").write_text("ya29.STATIC\n")
     creds = ab.resolve_credentials(briefing, briefing_secrets)
-    cuda = next(ws for ws in briefing[0].workspaces if ws.name == "cuda-dev")
-    assert {p.name: p.refresh_strategy for p in cuda.providers if p.name != "nvidia"} == {
+    pa = next(ws for ws in briefing[0].workspaces if ws.name == "personal-assistant")
+    assert {p.name: p.refresh_strategy for p in pa.providers if p.name != "nvidia"} == {
         "slack": "", "gmail": ""}
-    assert creds["cuda-dev"]["slack"] == "xoxb-STATIC" and creds["cuda-dev"]["gmail"] == "ya29.STATIC"
+    assert creds["personal-assistant"]["slack"] == "xoxb-STATIC" and creds["personal-assistant"]["gmail"] == "ya29.STATIC"
 
 
 def test_neither_material_nor_token_is_refused(ab, briefing, briefing_secrets):
@@ -127,8 +127,8 @@ def test_neither_material_nor_token_is_refused(ab, briefing, briefing_secrets):
 
 
 def test_an_unknown_refresh_strategy_is_refused(ab):
-    files = profile_files("daily-briefing")
-    key = next(k for k in files if k.endswith("cuda-dev__providers.yaml"))
+    files = profile_files("personal-assistant")
+    key = next(k for k in files if k.endswith("personal-assistant__providers.yaml"))
     files[key] = files[key].replace("strategy: oauth2-refresh-token", "strategy: magic", 1)
     with pytest.raises(ab.InstallerError, match="unsupported refresh strategy 'magic'"):
         ab.validate_profiles(ab.parse_profiles(files))
@@ -144,11 +144,11 @@ def test_the_nemoclaw_sandbox_is_created_with_the_bundle_mounted(
     creds = ab.resolve_credentials(briefing, briefing_secrets)
     applier(ab, config, creds).apply(briefing)
     assert not [c for c in fake_env.other_calls("nemoclaw") if c["args"][:1] == ["onboard"]]
-    sb = fake_env.openshell_state()["sandboxes"]["cuda-dev/cuda-sandbox"]
+    sb = fake_env.openshell_state()["sandboxes"]["personal-assistant/assistant"]
     mounts = sb["driverConfig"]["podman"]["mounts"]
     assert [(m["target"], m["read_only"]) for m in mounts] == [("/sandbox/harness", True)]
     assert set(sb["providers"]) == {"nvidia", "slack", "gmail"}
-    scripts = "\n".join(c[-1] for c in calls(fake_env, "sandbox", "exec") if c[3] == "cuda-sandbox")
+    scripts = "\n".join(c[-1] for c in calls(fake_env, "sandbox", "exec") if c[3] == "assistant")
     assert """openclaw config set plugins.load.paths '["/sandbox/harness"]'""" in scripts
 
 
@@ -158,15 +158,15 @@ def test_the_bundle_needs_the_slack_and_gmail_profiles(ab, fake_env, config, bri
     creds = ab.resolve_credentials(briefing, briefing_secrets)
     with pytest.raises(ab.InstallerError):
         applier(ab, config, creds).apply(briefing)
-    assert "cuda-dev/cuda-sandbox" not in (fake_env.openshell_state() or {}).get("sandboxes", {})
+    assert "personal-assistant/assistant" not in (fake_env.openshell_state() or {}).get("sandboxes", {})
 
 
 def test_an_attached_provider_restarts_the_gateway(ab):
     """The gateway keeps the environment it started with: a new provider's
     placeholder reaches the agent only after a restart."""
-    a = ab.openclaw_gateway_script({}, "cuda-dev", "cuda-sandbox", "OPENCLAW_HOME=/sandbox",
+    a = ab.openclaw_gateway_script({}, "personal-assistant", "assistant", "OPENCLAW_HOME=/sandbox",
                                    providers=["nvidia"])
-    b = ab.openclaw_gateway_script({}, "cuda-dev", "cuda-sandbox", "OPENCLAW_HOME=/sandbox",
+    b = ab.openclaw_gateway_script({}, "personal-assistant", "assistant", "OPENCLAW_HOME=/sandbox",
                                    providers=["nvidia", "slack", "gmail"])
     fingerprint = lambda s: next(l for l in s.splitlines() if "saw-gateway.sha256" in l and "!=" in l)  # noqa: E731
     assert fingerprint(a) != fingerprint(b)

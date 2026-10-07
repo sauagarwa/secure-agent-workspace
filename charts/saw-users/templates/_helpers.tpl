@@ -177,7 +177,7 @@ each with the VM ports its oauth2-proxy and its forward listen on. A user's
 {{/*
 "true" when the user's sandboxes load a harness bundle: the user asked for it
 (harnessEnabled), or one of their profiles has a sandbox that needs its bundle
-(the catalog's `harnessRequired`, e.g. daily-briefing).
+(the catalog's `harnessRequired`, e.g. personal-assistant).
 */}}
 {{- define "saw-users.harnessEnabled" -}}
 {{- $on := .user.harnessEnabled | default false -}}
