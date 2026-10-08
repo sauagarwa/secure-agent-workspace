@@ -168,6 +168,9 @@ into the portal in Step 7.
 
 ## Step 5. Install the platform
 
+On an NVIDIA LaunchPad cluster, follow [docs/launchpad.md](docs/launchpad.md)
+for access and for installing from the bastion instead.
+
 Copy the virtual machine image into the cluster (about 5 minutes):
 
 ```bash
@@ -329,3 +332,5 @@ openshell logs assistant --workspace personal-assistant --source sandbox    # th
 - [docs/daily-briefing.md](docs/daily-briefing.md): how the briefing,
   token refresh and read-only access work.
 - [README.md](README.md): the platform, and other ways to install it.
+- [docs/launchpad.md](docs/launchpad.md): running the demo on an NVIDIA
+  LaunchPad cluster (SSH tunnel, browser, installing from the bastion).
