@@ -151,3 +151,118 @@ def test_an_unknown_provider_type_still_gets_the_keepalive(ab, fake_env, config,
     make_applier(ab, config, creds).apply(profiles)
     units = [c for c in fake_env.other_calls("sudo") if "tee" in c["args"]]
     assert any("openshell-sandbox-notebook" in " ".join(c["args"]) for c in units)
+
+
+# -- caBundle: extra CAs for the OIDC issuer -----------------------------------------
+
+PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+
+
+def _ca_shell(ab, calls):
+    class Recorder(ab.Shell):
+        def run(self, argv, **kw):
+            calls.append(argv)
+            return ab.Result(0)
+    return Recorder()
+
+
+def test_ca_bundle_is_trusted_and_the_store_rebuilt(ab, tmp_path):
+    """The gateway verifies the OIDC issuer with the system trust store and
+    exits when it cannot: a cluster whose apps certificate is its own ingress
+    CA needs that CA trusted."""
+    calls, anchor = [], tmp_path / "anchors" / "saw-ca-bundle.crt"
+    assert ab.trust_ca_bundle(_ca_shell(ab, calls), PEM, anchor=anchor) is True
+    assert anchor.read_text() == PEM + "\n"
+    assert calls == [["update-ca-trust", "extract"]]
+    # Unchanged: nothing to do, no restart owed.
+    assert ab.trust_ca_bundle(_ca_shell(ab, calls), PEM, anchor=anchor) is False
+    assert len(calls) == 1
+
+
+def test_an_emptied_ca_bundle_is_removed(ab, tmp_path):
+    calls, anchor = [], tmp_path / "saw-ca-bundle.crt"
+    anchor.write_text(PEM + "\n")
+    assert ab.trust_ca_bundle(_ca_shell(ab, calls), "", anchor=anchor) is True
+    assert not anchor.exists() and calls == [["update-ca-trust", "extract"]]
+    assert ab.trust_ca_bundle(_ca_shell(ab, calls), "", anchor=anchor) is False
+
+
+def test_a_ca_bundle_that_is_not_pem_is_refused(ab, tmp_path):
+    with pytest.raises(ab.InstallerError, match="not a PEM"):
+        ab.trust_ca_bundle(_ca_shell(ab, []), "not a cert", anchor=tmp_path / "x.crt")
+
+
+def test_the_ca_bundle_comes_from_config_or_the_cluster_ca_secret(ab, tmp_path):
+    """caBundle wins; else caBundleSecret's ca-bundle.crt (the cluster's
+    ingress CA, mounted like a provider Secret); else nothing."""
+    secrets = tmp_path / "secrets"
+    (secrets / "saw-ingress-ca").mkdir(parents=True)
+    (secrets / "saw-ingress-ca" / "ca-bundle.crt").write_text(PEM + "\n")
+    assert ab.configured_ca_bundle({"caBundleSecret": "saw-ingress-ca"}, secrets) == PEM
+    assert ab.configured_ca_bundle({"caBundle": "X", "caBundleSecret": "saw-ingress-ca"}, secrets) == "X"
+    assert ab.configured_ca_bundle({}, secrets) == ""
+
+
+def test_a_missing_cluster_ca_secret_fails_install(ab, tmp_path):
+    """Not mounted yet: fail (install retries at the next boot) rather than
+    start a gateway that cannot verify the issuer."""
+    with pytest.raises(ab.InstallerError, match="saw-ingress-ca is not mounted"):
+        ab.configured_ca_bundle({"caBundleSecret": "saw-ingress-ca"}, tmp_path)
+    with pytest.raises(ab.InstallerError, match="invalid caBundleSecret"):
+        ab.configured_ca_bundle({"caBundleSecret": "../etc"}, tmp_path)
+
+
+def test_sandbox_ui_proxies_get_the_vm_trust_store(ab, tmp_path):
+    """oauth2-proxy sees the VM's trust store (with oidc.caBundle), so it can
+    verify the issuer when insecureSkipIssuerTlsVerify is false."""
+    cfg = {"oidcIssuer": "https://kc.example.com/realms/openshell",
+           "sandboxUi": [{"workspace": "ws", "sandbox": "sb", "host": "h.example.com",
+                          "proxyPort": 18800, "forwardPort": 18900, "portName": "ui-0"}],
+           "sandboxUiProxy": {"allowedUsers": ["alice"]}}
+    units, _ = ab.sandbox_ui_units(cfg, tmp_path, "cookie", "saw-installer")
+    (proxy,) = [t for n, t in units.items() if n.startswith("saw-ui-proxy-")]
+    assert f"-v {ab.TRUST_BUNDLE}:/etc/ssl/certs/ca-certificates.crt:ro " in proxy
+
+
+def test_an_untrusted_issuer_fails_install_with_the_fix(ab):
+    """The gateway only says "OIDC discovery request failed" and exits, and
+    install then times out on its port. Check first and name the fix."""
+    import ssl
+    from urllib.error import URLError
+
+    def untrusted(url, timeout):
+        err = ssl.SSLCertVerificationError(1, "certificate verify failed")
+        err.verify_message = "self-signed certificate in certificate chain"
+        raise URLError(err)
+
+    with pytest.raises(ab.InstallerError) as exc:
+        ab.check_issuer_trusted("https://kc.apps.example.com/realms/openshell", opener=untrusted)
+    msg = str(exc.value)
+    assert "\n" not in msg      # install's status keeps the first line only
+    assert "self-signed certificate in certificate chain" in msg
+    assert "oidc.caBundle" in msg and "default-ingress-cert" in msg
+
+
+def test_other_issuer_failures_only_warn(ab, capsys):
+    from urllib.error import URLError
+
+    def unreachable(url, timeout):
+        raise URLError("Name or service not known")
+
+    class Ok:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return b"{"
+
+    ab.check_issuer_trusted("https://kc.example.com/realms/openshell", opener=unreachable)
+    assert "WARN: cannot reach the OIDC issuer" in capsys.readouterr().out
+    seen = []
+    ab.check_issuer_trusted("https://kc.example.com/realms/openshell/",
+                            opener=lambda url, timeout: seen.append(url) or Ok())
+    assert seen == ["https://kc.example.com/realms/openshell/.well-known/openid-configuration"]
+    ab.check_issuer_trusted("", opener=unreachable)     # no issuer: nothing to check
