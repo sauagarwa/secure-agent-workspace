@@ -11,6 +11,10 @@ PUSH           ?= true
 # NemoClaw CLI images from quay itself.
 MIRROR_IMAGES  ?= openshell-gateway
 OPENSHELL_VERSION ?= 0.0.116
+# Where CI publishes the multi-arch (amd64 + arm64) NemoClaw and governance
+# interceptor images; `make publish-nemoclaw-multiarch` copies them to QUAY_REPO.
+GHCR_REPO      ?= ghcr.io/validatedpatterns-sandbox
+NEMOCLAW_IMAGES ?= nemoclaw-sandbox nemoclaw-cli
 # OpenShell release the governance interceptor is built from (must match the
 # SAW gateways; image-builder-charts/helm/governance-interceptor-image).
 OPENSHELL_INTERCEPTOR_REF ?= v0.1.2
@@ -135,7 +139,7 @@ WORKSPACE      ?= default
 	@echo "Prerequisites OK."
 
 .PHONY: check-prereqs keycloak-check generate-keys \
-        build-nemoclaw build-nemoclaw-cli \
+        build-nemoclaw build-nemoclaw-cli publish-nemoclaw-multiarch \
         build-gateway-docker build-gateway-podman copy-images \
         keycloak keycloak-issuer login whoami logout delete-keycloak \
         keycloak-register keycloak-redirects keycloak-redirects-sync \
@@ -176,6 +180,14 @@ build-nemoclaw-cli: ## Build NemoClaw CLI image and push to quay
 	else \
 		echo "PUSH=false: nemoclaw-cli:latest stays in this cluster's internal registry ($(BUILD_NS))."; \
 	fi
+
+publish-nemoclaw-multiarch: ## Copy the multi-arch NemoClaw images CI built (GHCR_REPO) to QUAY_REPO, both architectures
+	@for img in $(NEMOCLAW_IMAGES); do \
+		echo "$(GHCR_REPO)/$$img:latest -> $(QUAY_REPO)/$$img:latest (+ :$(OPENSHELL_VERSION))"; \
+		oc image info --show-multiarch $(GHCR_REPO)/$$img:latest | grep -E '^ *(OS|Arch)' | sort -u; \
+		oc image mirror --keep-manifest-list=true $(GHCR_REPO)/$$img:latest $(QUAY_REPO)/$$img:latest || exit 1; \
+		oc image mirror --keep-manifest-list=true $(GHCR_REPO)/$$img:latest $(QUAY_REPO)/$$img:$(OPENSHELL_VERSION) || exit 1; \
+	done
 
 # --- Governance interceptor image ---
 
