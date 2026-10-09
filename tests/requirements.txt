@@ -4,4 +4,4 @@ pytest>=8
 PyYAML>=6
 click>=8.0
 requests>=2.28
-cryptography>=3.4   # scripts/apf-bundle.py (APF policy bundle signing)
+cryptography>=41   # scripts/apf-bundle.py (APF policy bundle signing); tests

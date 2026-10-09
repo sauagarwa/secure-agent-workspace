@@ -32,6 +32,7 @@ Deploy isolated, per-user AI agent sandboxes on OpenShift Virtualization with OI
   - [Technical details](#technical-details)
     - [Security model](#security-model)
     - [Keycloak test users](#keycloak-test-users)
+    - [Web UI sign-in (redirect URIs)](#web-ui-sign-in-redirect-uris)
     - [Namespace modes](#namespace-modes)
     - [OIDC issuer resolution](#oidc-issuer-resolution)
   - [Tags](#tags)
@@ -138,7 +139,9 @@ The following diagrams are from the [NVIDIA Secure Agent Workspace OpenShift Vir
 | Red Hat Build of Keycloak operator | stable-v26 channel |
 | Helm CLI | 3.x |
 | oc CLI | matching cluster version |
-| openshell CLI | [latest release](https://github.com/NVIDIA/OpenShell/releases) |
+| openshell CLI | [a release from the gateway's release series](https://github.com/NVIDIA/OpenShell/releases) (0.1.x for this BOM) |
+| jq, curl, openssl | required by `make login` |
+| python3 | required by `make openshell-saw-create` |
 
 ### Required user permissions
 
@@ -180,7 +183,10 @@ oc login --server=https://api.<cluster>:6443 -u <user>
 make generate-keys
 
 # 4. Configure secrets
-cp values-secret.yaml.template ~/values-secret.yaml
+# make generate-keys (step 3) already created ~/values-secret.yaml from the
+# template; edit it to add your inference and web-search keys. The Validated
+# Patterns framework reads ~/values-secret-secure-agent-workspace.yaml before ~/values-secret.yaml,
+# so the pattern-named file wins when both exist.
 # The default profile needs an NVIDIA key and a Brave Search key:
 #   ~/.nvidia-api-key and ~/.brave-api-key (one line each, chmod 600)
 
@@ -189,6 +195,13 @@ cp values-secret.yaml.template ~/values-secret.yaml
 # No build needed — images are pre-built by maintainers.
 make copy-images
 
+# 5b. Optional: check whether workspace VMs will trust Keycloak's
+# certificate. On a cluster with OpenShift's self-signed *.apps certificate the
+# pattern trusts the cluster's ingress CA by itself (saw-ingress-ca imperative
+# job); for an external issuer with a private CA (ISSUER=<url>) it prints the
+# oidc.caBundle snippet to add to overrides/saw-users.yaml.
+make check-oidc-ca
+
 # 6. Deploy the pattern (runs inside the VP utility container)
 # NOTE: The deploying branch must exist on the remote (origin).
 # pattern.sh forwards TARGET_BRANCH and TARGET_ORIGIN (not TARGET_REVISION).
@@ -196,7 +209,7 @@ make copy-images
 ./pattern.sh make install
 
 # 7. Authenticate and configure the CLI
-make login                    # Opens browser → login with alice / alice
+make login                    # Opens browser → alice; password: make keycloak-passwords
 export OPENSHELL_SAW_NAME=alice          # VM alice in namespace saw-alice
 make openshell-saw-configure-gateway
 openshell gateway login $OPENSHELL_SAW_NAME   # Authenticate CLI with gateway
@@ -216,7 +229,7 @@ Upgrading an install that still has the `openshell-saw` VM: see [Upgrading from 
 
 #### Option B: Quickstart (manual, step-by-step)
 
-Install operators from OperatorHub first, then deploy components manually. RHBK must be installed in the `saw-keycloak` namespace (set `KEYCLOAK_NS` to use another one, e.g. `KEYCLOAK_NS=keycloak` for a Keycloak your cluster already has). Each sandbox gets its own namespace, `saw-<name>`.
+Install operators from OperatorHub first, then deploy components manually. After the OpenShift Virtualization operator is installed, create a `HyperConverged` resource, or no node can run VMs; External Secrets is only needed for Option A. See [Quickstart notes](docs/deployment-guide.md#quickstart-notes). The copy-images step mirrors prebuilt images and may fall back to the `latest` tag; see [Golden image tag](docs/deployment-guide.md#golden-image-tag). RHBK must be installed in the `saw-keycloak` namespace (step 3 sets `KEYCLOAK_NS`; point it at another namespace to reuse a Keycloak your cluster already has). Each sandbox gets its own namespace, `saw-<name>`.
 
 ```bash
 # 1. Clone the repository
@@ -225,58 +238,77 @@ cd secure-agent-workspace
 
 # 2. Log in to OpenShift with cluster-admin
 oc login --server=https://api.<cluster>:6443 -u <user>
+# Lab clusters with a self-signed API certificate: add --insecure-skip-tls-verify (disposable clusters only)
 
-# 3. Verify prerequisites
+# 3. Set the variables the following targets read (set them again in every new terminal)
+export KEYCLOAK_NS=saw-keycloak     # or the namespace of a Keycloak your cluster already runs
+export OPENSHELL_SAW_NAME=alice     # the user VM, deployed into namespace saw-alice
+
+# 4. Verify prerequisites
 make check-prereqs
+# also enables the internal image registry's default route if it is off
 
-# 4. Generate SSH keys
+# 5. Generate SSH keys
 make generate-keys
 
-# 5. Copy pre-built images to the cluster
+# 6. Copy pre-built images to the cluster
 make copy-images
 
-# 6. Deploy Keycloak (if one is already running in KEYCLOAK_NS, it is used;
-#    you are asked before the OpenShell realm is imported into it)
+# 7. Deploy Keycloak (if one is already running in KEYCLOAK_NS, it is used;
+#    you are asked before the OpenShell realm is imported into it;
+#    set USE_EXISTING_KEYCLOAK=yes to import the realm without the prompt)
 make keycloak
 
-# 7. Verify Keycloak (realm, openshell-cli client, roles)
+# 8. Verify Keycloak (realm, openshell-cli client, roles)
 make keycloak-check
 make keycloak-issuer
 
-# 8. Deploy governance interceptor
+# 9. Deploy governance interceptor
 helm upgrade --install governance-policy charts/governance-policy \
   --namespace openshell-agents
 helm upgrade --install governance-interceptor charts/governance-interceptor \
   --namespace openshell-agents
 
-# 9. Authenticate
-make login                    # Opens browser → login with alice / alice
+# 10. Authenticate
+make login                    # Opens browser → alice; password: make keycloak-passwords
 make whoami                   # Verify identity
 
-# 10. Create a sandbox (deploys into namespace saw-alice)
-export OPENSHELL_SAW_NAME=alice
+# 11. Create the user VM (deploys into namespace saw-$OPENSHELL_SAW_NAME)
+#     Keys come from files so they stay out of the shell history.
+#     The default data-science profile also creates a Brave Search provider,
+#     so it needs WEB_SEARCH_API_KEY; without it the in-VM apply fails with
+#     "credential for provider 'brave' in workspace 'default' not found".
+#     The target asks "Press Enter to set owner to '<you>', ..."; press Enter.
+#     To create a VM for someone else, pass OWNER=<name> OWNER_SUBJECT=<keycloak-user-id>.
+WEB_SEARCH_API_KEY="$(cat ~/.brave-api-key)" \
 make openshell-saw-create \
   PROVIDER=build \
   MODEL=nvidia/nemotron-3-super-120b-a12b \
-  API_KEY=<your-api-key>
+  API_KEY="$(cat ~/.nvidia-api-key)"
+```
 
-# 11. Follow the in-VM installer (in another terminal)
+> **OIDC issuer:** If `KEYCLOAK_NS` does not name the namespace of your Keycloak, the target finds no issuer and deploys the gateway without OIDC, with no error. Check the result with `helm get values "$OPENSHELL_SAW_NAME" -n "saw-$OPENSHELL_SAW_NAME" -o json | jq -r .oidc.issuerUrl` (it prints the issuer URL, or `null` when OIDC is off).
+
+```bash
+# 12. Follow the in-VM installer (in another terminal)
 make openshell-saw-logs
 
-# 12. Check status
+# 13. Check status
 make openshell-saw-list
 make status
 
-# 13. Wait for the installer to finish
+# 14. Wait for the installer to finish
+#     openshell-saw-status adds your public key to the VM's access Secret,
+#     then reaches the VM over SSH to read the installer status.
 make openshell-saw-status
 # Wait for "install" and "apply" to show "phase": "Done"
 
-# 14. Configure the openshell CLI
+# 15. Configure the openshell CLI: registers the gateway and signs you in
+#     through the browser (log in as alice; password: make keycloak-passwords).
 make openshell-saw-configure-gateway
-
-# 15. Authenticate CLI with the gateway
-openshell gateway login $OPENSHELL_SAW_NAME
-# Log in as alice / alice in the browser
+#     openshell gateway login $OPENSHELL_SAW_NAME
+#     Only needed when a device-code sign-in (OPENSHELL_NO_BROWSER=1) did not
+#     finish, or the token expired.
 
 # 16. Verify sandboxes
 # sandbox list without --workspace only shows workspace "default"
@@ -284,13 +316,14 @@ openshell sandbox list
 openshell sandbox list --workspace cuda-dev
 
 # 17. Launch TUI (pick one)
+# At OpenShell 0.1.x, cuda-sandbox runs plain OpenClaw (NemoClaw onboarding stops in its preflight checks).
 SANDBOX_NAME=cuda-sandbox \
 WORKSPACE=cuda-dev \
 make nemoclaw-tui # NemoClaw
 SANDBOX_NAME=notebook \
 make openclaw-tui # OpenClaw
 
-# 18. Launch GUI (pick one)
+# 18. Launch GUI (pick one): make ...-gui port-forwards to the sandbox UI.
 SANDBOX_NAME=cuda-sandbox \
 WORKSPACE=cuda-dev \
 GUI_PORT=18789 \
@@ -300,7 +333,11 @@ GUI_PORT=18790 \
 make openclaw-gui # OpenClaw
 ```
 
-> **Token expiry:** The OIDC access token lasts 10 hours. If it expires, run `make login` to re-authenticate, then `make openshell-saw-configure-gateway` to copy the fresh token. Alternatively, run `openshell gateway login` directly to re-authenticate with the gateway.
+> **Token expiry:** The OIDC access token lasts 10 hours. The `openshell-cli` client asks for 24 hours, but Keycloak caps the access token at the realm's SSO Session Max, which defaults to 10 hours because the realm import does not raise it; the refresh token lapses after 30 minutes without use. If the token expires, run `make login` to re-authenticate, then `make openshell-saw-configure-gateway` to copy the fresh token. Alternatively, run `openshell gateway login` directly to re-authenticate with the gateway.
+
+> **Shell in a sandbox:** `openshell sandbox connect` attaches to the sandbox's main process, which in SAW sandboxes is `sleep infinity` with no terminal, so it shows nothing. Open a shell with `openshell sandbox exec -n notebook -- sh` (use `--workspace cuda-dev` for `cuda-sandbox`). See [Shell access](docs/deployment-guide.md#shell-access).
+
+> **Agent UI:** `make openclaw-gui` and `make nemoclaw-gui` port-forward to the sandbox UI. The `<name>-dashboard` Route does not reach it on OpenShell 0.1.x; the pattern path (Option A) gives each sandbox with a UI its own signed-in Route instead. See [OpenClaw UI and the dashboard Route](docs/deployment-guide.md#openclaw-ui-and-the-dashboard-route). Web search and web fetch do not work in the default `notebook` sandbox; see [Web search in the default sandbox](docs/deployment-guide.md#web-search-in-the-default-sandbox).
 
 You can set `OPENSHELL_SAW_NAME` once via `export` and all `openshell-saw-*` targets will use it automatically. The sandbox namespace defaults to `saw-$OPENSHELL_SAW_NAME`; set `SAW_NS` if it differs (the pattern's default sandbox is `alice` in `saw-alice`).
 
@@ -437,6 +474,14 @@ While APF is not running the gateways refuse write operations (fail closed). If 
 
 **Changing policy:** edit `charts/governance-policy`, run `make apf-bundle` (it bumps `policy_revision`), commit and push the new bundle. **Switching back:** set `engine: interceptor` (or remove the override), delete the `governance-apf` Application and restart the user VMs.
 
+### Self-service workspaces and sandbox web UIs
+
+Users can create their own workspace from Red Hat Developer Hub: they pick a SAW-BOM profile and enter only the keys it needs; the keys go to Vault under `secret/data/hub/saw-<user>`, and an Argo CD ApplicationSet builds the workspace like any `overrides/saw-users.yaml` entry. A sandbox with `ui: {route: true}` in its profile gets its own route to the OpenClaw / NemoClaw web UI, signed in with Keycloak and open to the workspace owner only (its sign-in is registered by the redirect registrar: [Web UI sign-in](#web-ui-sign-in-redirect-uris)). Details: [docs/self-service-portal.md](docs/self-service-portal.md); how it fits together: [docs/rhdh-architecture.md](docs/rhdh-architecture.md); step-by-step test: [docs/rhdh-user-guide.md](docs/rhdh-user-guide.md).
+
+### Agent harness: skills, MCP servers and tools
+
+A sandbox's `harnessRef` in its SAW-BOM profile names a harness bundle: skills, MCP servers (`mcp.json`) and OpenClaw tool plugins (`.mjs`). The installer puts it, unchanged, into a volume the sandbox mounts read-only at `/sandbox/harness`, and points OpenClaw at it. Keys never go in a bundle: a server or plugin that calls a service gets its key through a provider attached to the sandbox. A bundle is either an OCI image built from `harness-bundles/` and published to GHCR by CI (`harnessRef: { image: ghcr.io/<owner>/saw-harness-<bundle>@sha256:… }`), or an inline bundle in the saw-bom chart (`harnessRef: { name: <bundle> }`). Details: [docs/harness-bundles.md](docs/harness-bundles.md).
+
 ### Validating the deployment
 
 ```bash
@@ -559,12 +604,95 @@ The system implements layered isolation:
 
 ### Keycloak test users
 
-| Username | Password | Roles |
-|---|---|---|
-| `developer` | `developer` | `openshell-user` |
-| `admin` | `admin` | `openshell-user`, `openshell-admin` |
-| `alice` | `alice` | `openshell-user`, `openshell-admin` |
-| `bob` | `bob` | `openshell-user`, `openshell-admin` |
+| Username | Roles |
+|---|---|
+| `developer` | `openshell-user` |
+| `admin` | `openshell-user`, `openshell-admin` |
+| `alice` | `openshell-user`, `openshell-admin` |
+| `bob` | `openshell-user`, `openshell-admin` |
+
+There are no default passwords. Each user gets a random one (20+
+characters with upper and lower case, digits and symbols), kept in Secret
+`openshell-keycloak-user-passwords` in the Keycloak namespace: from Vault in
+the Validated Pattern (`keycloak-users` in `values-secret.yaml.template`,
+generated by `load-secrets`), or generated by `make keycloak`. Show them with
+`make -f Makefile-quickstart keycloak-passwords`.
+
+Self-registration is off: an admin adds users from `overrides/saw-users.yaml`
+(the same list that creates their workspaces). Each name not in the realm
+yet gets an account with a generated password; users that exist are left
+alone, so running it again is safe. Optional per entry: `email`,
+`firstName`, `lastName`, `roles` (default `[openshell-user]`). Another file:
+`USERS_FILE=<file>`.
+
+```bash
+make -f Makefile-quickstart keycloak-add-users                      # prints the new passwords
+make -f Makefile-quickstart keycloak-password KC_USER=carol         # print carol's password
+make -f Makefile-quickstart keycloak-reset-password KC_USER=carol   # new password, printed
+```
+
+Passwords set this way are kept in Secret `openshell-keycloak-users`;
+`keycloak-passwords` lists everyone's.
+
+The realm requires strong passwords for anything users set themselves
+(`keycloak.passwordPolicy`: 14+ characters, upper, lower, digit, special,
+not the user name or email, not one of the last 5), and locks an account out
+for a growing time after 5 failed sign-ins (`keycloak.bruteForce`). A realm
+imported before this kept its old settings and passwords (an import never
+changes an existing realm): run `make -f Makefile-quickstart keycloak-harden`
+once to apply them, turn registration off, and set the generated passwords.
+
+### Web UI sign-in (redirect URIs)
+
+Each workspace's web UIs (the VM's OpenShell dashboard, and each sandbox UI
+route) sign in through Keycloak's `openshell-dashboard` client, and Keycloak
+only sends the browser back to a redirect URI registered on that client. Every
+UI has its own host, and Keycloak takes no wildcard in a host name, so each
+one is registered.
+
+By default the **redirect registrar** does it: one Deployment in Keycloak's
+namespace (`charts/openshell-keycloak`, `redirectRegistrar`) registers each
+web UI route's `https://<host>/oauth2/callback` within about 15 seconds of
+the route appearing (from `overrides/saw-users.yaml` or the self-service
+portal), and removes the entries of workspaces that are gone. It signs in as
+its own Keycloak client that may only manage the OpenShell realm's clients;
+its init container uses the Keycloak admin Secret once per start to set that
+client up, and the registrar itself never sees it.
+
+To keep Keycloak admin access out of the cluster entirely, turn it off
+(`redirectRegistrar.enabled: false` in the `openshell-keycloak` values) and
+register as an administrator instead, with your own `oc` session. The same
+targets work alongside the registrar too:
+
+```bash
+make -f Makefile-quickstart keycloak-register KC_USER=carol   # account (if new) + carol's web UIs
+make -f Makefile-quickstart keycloak-redirects                # what is registered, what is missing
+make -f Makefile-quickstart keycloak-redirects-sync           # all workspaces; drops deleted ones
+```
+
+`keycloak-register` creates the Keycloak account if it does not exist yet
+(generated password, printed, as with `keycloak-add-users`), then adds
+`https://<host>/oauth2/callback` for each of the user's web UI routes,
+waiting up to `REDIRECT_WAIT` seconds (default 600) for Argo CD to create
+them. Until then, signing in to that workspace's UIs fails with Keycloak's
+"Invalid parameter: redirect_uri". `keycloak-redirects-sync` adds whatever is
+missing and removes the entries it added for workspaces that are gone;
+entries it did not add (registered by hand, other apps) are kept.
+
+The registrar and `keycloak-redirects-sync` apply the same rules.
+
+The web UI routes are the ones labelled `saw.redhat.com/oidc-redirect=true` in
+the `saw-*` namespaces. With another OIDC issuer, register their callbacks
+there instead; this lists them:
+
+```bash
+oc get routes -A -l saw.redhat.com/oidc-redirect=true \
+  -o jsonpath='{range .items[*]}https://{.spec.host}/oauth2/callback{"\n"}{end}'
+```
+
+The scripts verify Keycloak's certificate; for a router certificate signed by
+a private CA, set `KEYCLOAK_CA=<ca-bundle.pem>`. For a Keycloak CR not named
+`openshell-keycloak`, set `KEYCLOAK_NAME`.
 
 ### Namespaces
 

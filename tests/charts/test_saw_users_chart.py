@@ -29,7 +29,8 @@ BOB = {
     "ownerSubject": "3f2c-subject",
     "vaultPrefix": "secret/data/hub/saw-bob",
     "profiles": ["custom"],
-    "values": {"dashboard": {"insecureSkipIssuerTlsVerify": False}},
+    "values": {"dashboard": {"insecureSkipIssuerTlsVerify": True},
+               "oidc": {"issuerUrl": "https://sso.example.com/realms/corp"}},
 }
 
 
@@ -87,10 +88,17 @@ def test_two_users_get_labelled_namespaces_and_six_apps(tmp_path):
         assert application["metadata"]["namespace"] == "vp-gitops"
         assert "finalizers" not in application["metadata"]
         assert application["spec"]["destination"]["name"] == "in-cluster"
+        # Server-side apply, and nothing else (no CreateNamespace: the chart
+        # makes the namespaces): client-side apply's last-applied annotation
+        # would hold the whole installer ConfigMap, past the 256 KiB limit.
         assert application["spec"]["syncPolicy"] == {"automated": {"selfHeal": True},
-                                                      "retry": {"limit": 20}}
+                                                      "retry": {"limit": 20},
+                                                      "syncOptions": ["ServerSideApply=true"]}
+        # Found on the GB200: without server-side diff the VM stayed
+        # OutOfSync on the fields KubeVirt defaults.
+        assert (application["metadata"]["annotations"]["argocd.argoproj.io/compare-options"]
+                == "ServerSideDiff=true")
         assert "ignoreMissingValueFiles" not in application["spec"]["source"]["helm"]
-        assert "syncOptions" not in application["spec"]["syncPolicy"]
 
 
 def test_waves_release_names_and_value_overrides(tmp_path):
@@ -101,10 +109,16 @@ def test_waves_release_names_and_value_overrides(tmp_path):
     assert secrets["spec"]["source"]["path"] == "charts/pattern-secrets"
     assert secrets["spec"]["source"]["helm"]["releaseName"] == "saw-alice-secrets"
     assert secrets["spec"]["destination"]["namespace"] == "saw-alice"
-    assert helm_values(secrets) == {"vaultPrefix": "secret/data/hub"}
+    assert helm_values(secrets) == {"vaultPrefix": "secret/data/hub",
+                                    "sshVaultPrefix": "secret/data/hub",
+                                    "secrets": ["inference", "web-search"],
+                                    "clusterCaSecret": "saw-ingress-ca"}
 
     bob_secrets = helm_values(app(docs, "saw-bob-secrets"))
-    assert bob_secrets == {"vaultPrefix": "secret/data/hub/saw-bob"}
+    assert bob_secrets == {"vaultPrefix": "secret/data/hub/saw-bob",
+                           "sshVaultPrefix": "secret/data/hub",
+                           "secrets": ["inference", "web-search"],
+                           "clusterCaSecret": "saw-ingress-ca"}
 
     bom = app(docs, "saw-alice-bom")
     assert bom["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "0"
@@ -120,17 +134,20 @@ def test_waves_release_names_and_value_overrides(tmp_path):
     assert alice["spec"]["source"]["targetRevision"] == "main"
     alice_values = helm_values(alice)
     assert alice_values["accessControl"] == {"owner": "alice", "ownerSubject": ""}
-    assert alice_values["job"]["waitForSecrets"] is True
-    assert alice_values["job"]["backoffLimit"] == 5
-    assert alice_values["dashboard"]["insecureSkipIssuerTlsVerify"] is True
+    assert "job" not in alice_values      # no prepare Job to tune
+    # The proxies verify the issuer; the VM trusts the cluster's ingress CA.
+    assert "insecureSkipIssuerTlsVerify" not in alice_values.get("dashboard", {})
+    assert alice_values["oidc"] == {"clusterCaSecret": "saw-ingress-ca"}
     assert alice_values["global"]["clusterDomain"] == "example.com"
     assert "originURL" not in alice_values["global"]
     assert "mtalvi" not in alice["spec"]["source"]["repoURL"]
 
     bob_values = helm_values(app(docs, "saw-bob"))
     assert bob_values["accessControl"] == {"owner": "bob", "ownerSubject": "3f2c-subject"}
-    assert bob_values["dashboard"]["insecureSkipIssuerTlsVerify"] is False
-    assert bob_values["job"]["waitForSecrets"] is True
+    assert bob_values["dashboard"]["insecureSkipIssuerTlsVerify"] is True
+    # A user's own values win; openshell-saw ignores clusterCaSecret for an
+    # external issuer.
+    assert bob_values["oidc"]["issuerUrl"] == "https://sso.example.com/realms/corp"
 
 
 def test_empty_global_values_are_left_out(tmp_path):
@@ -144,6 +161,25 @@ def test_empty_global_values_are_left_out(tmp_path):
     assert app(docs, "saw-alice")["metadata"]["namespace"] == "gitops-ns"
     namespace = by_kind(docs, "Namespace")[0]
     assert namespace["metadata"]["labels"]["argocd.argoproj.io/managed-by"] == "gitops-ns"
+
+
+def test_demo_harness_turns_on_allow_driver_config(tmp_path):
+    docs = docs_from(render_file(tmp_path, [{"name": "alice", "harnessEnabled": True}]))
+    assert helm_values(app(docs, "saw-alice-bom")) == {
+        "profiles": ["data-science"], "harnessEnabled": True,
+    }
+    assert helm_values(app(docs, "saw-alice"))["allowDriverConfig"] is True
+
+
+def test_demo_harness_off_leaves_allow_driver_config_unset(tmp_path):
+    docs = docs_from(render_file(tmp_path, [ALICE]))
+    assert "allowDriverConfig" not in helm_values(app(docs, "saw-alice"))
+
+
+def test_a_user_can_override_allow_driver_config_off(tmp_path):
+    user = {"name": "alice", "harnessEnabled": True, "values": {"allowDriverConfig": False}}
+    docs = docs_from(render_file(tmp_path, [user]))
+    assert helm_values(app(docs, "saw-alice"))["allowDriverConfig"] is False
 
 
 def test_prune_on_remove_adds_the_foreground_finalizer(tmp_path):
@@ -274,3 +310,68 @@ def test_rendered_machine_values_validate_in_the_shipped_installer(tmp_path):
     config = json.loads(installer["data"]["config.json"])
     assert config["vmName"] == "alice"
     assert config["ownerSubject"] == ""
+
+
+
+# -- profile catalog: sandbox UI routes and the Secrets to sync ----------------
+
+def test_the_profile_catalog_is_current():
+    """files/profile-catalog.json is generated from charts/saw-bom/profiles."""
+    result = subprocess.run([sys.executable, str(ROOT / "scripts" / "saw-profile-catalog.py"), "--check"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_ui_routes_come_from_the_profiles(tmp_path):
+    """data-science flags the default workspace's notebook and the cuda-dev
+    workspace's NemoClaw sandbox (ui.route: true)."""
+    values = helm_values(app(docs_from(render_file(tmp_path, [ALICE])), "saw-alice"))
+    assert values["sandboxUi"] == [{"workspace": "cuda-dev", "sandbox": "cuda-sandbox",
+                                    "proxyPort": 4201, "forwardPort": 14201},
+                                   {"workspace": "default", "sandbox": "notebook",
+                                    "proxyPort": 4202, "forwardPort": 14202}]
+
+
+def test_ui_routes_are_sorted_and_numbered(tmp_path):
+    user = {"name": "carol", "sandboxUi": [{"workspace": "zeta", "sandbox": "b"},
+                                            {"workspace": "alpha", "sandbox": "a"}]}
+    values = helm_values(app(docs_from(render_file(tmp_path, [user])), "saw-carol"))
+    assert [(e["workspace"], e["proxyPort"], e["forwardPort"]) for e in values["sandboxUi"]] == [
+        ("alpha", 4201, 14201), ("zeta", 4202, 14202)]
+
+
+def test_too_many_ui_routes_fail_the_render(tmp_path):
+    user = {"name": "carol", "sandboxUi": [{"workspace": "w", "sandbox": f"s{i}"} for i in range(9)]}
+    result = render_file(tmp_path, [user])
+    assert result.returncode != 0 and "at most 8" in result.stderr
+
+
+def test_only_the_profiles_secrets_are_synced_and_mounted(tmp_path):
+    """custom-inference reads inference (with url and model) and web-search."""
+    user = {"name": "dave", "profiles": ["custom-inference"]}
+    docs = docs_from(render_file(tmp_path, [user]))
+    assert helm_values(app(docs, "saw-dave-secrets"))["secrets"] == ["inference", "web-search"]
+    vm = helm_values(app(docs, "saw-dave"))
+    assert vm["inference"]["secretName"] == "inference"
+    assert vm["additionalProviderSecrets"] == ["web-search"]
+    assert vm["sandboxUi"] == []
+
+
+def test_namespace_labels_are_added(tmp_path):
+    docs = docs_from(render_file(tmp_path, [ALICE], {"namespaceLabels": {"saw.redhat.com/portal": "true"}}))
+    [ns] = [d for d in docs if d["kind"] == "Namespace"]
+    assert ns["metadata"]["labels"]["saw.redhat.com/portal"] == "true"
+    assert ns["metadata"]["labels"]["openshell.pattern/saw"] == "true"
+
+
+@pytest.mark.parametrize("name", ["alice-bom", "alice-secrets"])
+def test_names_that_would_take_another_users_apps_are_refused(tmp_path, name):
+    """saw-<u>-bom is user u's BOM app, and the VM app of a user named u-bom."""
+    result = render_file(tmp_path, [{"name": name}])
+    assert result.returncode != 0 and "ends in -bom or -secrets" in result.stderr
+
+
+def test_a_user_can_opt_into_the_demo_harness(tmp_path):
+    docs = docs_from(render_file(tmp_path, [dict(ALICE, harnessEnabled=True)]))
+    assert helm_values(app(docs, "saw-alice-bom")) == {
+        "profiles": ["data-science"], "harnessEnabled": True}
