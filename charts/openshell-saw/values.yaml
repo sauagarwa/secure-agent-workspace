@@ -359,6 +359,8 @@ egress:
     - iamcredentials.googleapis.com
     # The personal-assistant demo's Gmail provider.
     - gmail.googleapis.com
+    # The personal-assistant demo, beat 4 (charts/governance-policy/profiles/notion.yaml).
+    - api.notion.com
   # Added when harness bundles are on (allowDriverConfig): the installer
   # re-verifies a harness image's cosign signature on every apply (keyless:
   # Sigstore's Rekor and TUF root). GHCR and its blob host are always allowed
