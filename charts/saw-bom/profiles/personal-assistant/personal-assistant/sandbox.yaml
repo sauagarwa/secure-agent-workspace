@@ -7,7 +7,8 @@ spec:
       type: nemoclaw
       enabled: true
       agent: openclaw
-      image: quay.io/rh-ai-quickstart/nemoclaw-sandbox:latest
+      # TEST: OpenClaw 2026.9.2 so the harness MCP servers register (e2e/openclaw-test).
+      image: ghcr.io/sauagarwa/nemoclaw-sandbox:openclaw-2026.9.2
       providers:
         - nvidia
         - slack
