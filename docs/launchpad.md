@@ -94,7 +94,9 @@ Useful hosts for a workspace `<user>`:
 | Keycloak | `openshell-keycloak-ingress-saw-keycloak.<apps-domain>` |
 
 List them with `oc get route -n saw-<user>`. Users' passwords:
-`make -f Makefile-quickstart keycloak-passwords`.
+`make keycloak-passwords` lists who has one, `make keycloak-password KC_USER=<user>`
+names the Secret that holds it, and
+`oc -n saw-keycloak extract secret/<that Secret> --keys=<user> --to=-` reads it.
 
 ## 5. Installing the pattern from the bastion
 
@@ -146,16 +148,16 @@ virtctl ssh -n saw-<user> -i ~/.generated-ssh-keys/sandbox-ssh \
 - **Self-signed `*.apps` certificate.** Workspace VMs do not trust Keycloak's
   route on their own, and every workspace's install fails at OIDC discovery
   ("cannot verify the OIDC issuer's certificate", or the gateway not
-  listening on port 17670). PR #84 (`feat/oidc-ca-trust`) makes the pattern
-  trust the cluster's ingress CA by itself and adds `make check-oidc-ca` to
-  tell you before installing; without it, set `oidc.caBundle` to the output
-  of `oc get cm default-ingress-cert -n openshift-config-managed -o jsonpath='{.data.ca-bundle\.crt}'`.
+  listening on port 17670). The pattern trusts the cluster's ingress CA by
+  itself (PR #84); run `make check-oidc-ca` before installing to confirm.
+  To set it by hand, set `oidc.caBundle` to the output of
+  `oc get cm default-ingress-cert -n openshift-config-managed -o jsonpath='{.data.ca-bundle\.crt}'`.
 - **arm64 nodes (GB200).** Needs the `feat/arm64` branch (multi-arch
   OpenShell, a per-architecture VM image; its `docs/arm64.md` has the steps):
   turn the internal image registry on (it is often `Removed`; an
   `nfs-client` PVC works), build the golden VM image and the governance
   interceptor on the cluster with `PUSH=false`, and do not run
-  `make copy-images`.
+  `make images-mirror`.
 - **Argo CD resource names.** Plain `application` can resolve to another
   API group (`app.k8s.io`) on these clusters; use
   `applications.argoproj.io`, for example
