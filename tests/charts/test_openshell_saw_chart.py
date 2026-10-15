@@ -460,7 +460,6 @@ DEFAULT_EGRESS_HOSTS = [
     "www.googleapis.com",
     "iamcredentials.googleapis.com",
     "gmail.googleapis.com",
-    "api.notion.com",
 ]
 NODE_ALLOW_PORTS = [
     {"protocol": "TCP", "port": 443},
