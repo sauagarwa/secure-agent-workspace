@@ -1020,7 +1020,7 @@ def test_installer_disk_ships_provider_profiles(default_docs, ab, tmp_path):
     assert data["provider-profile-brave.yaml"] == (SAW_PROFILES / "brave.yaml").read_text()
     for key, value in data.items():
         (tmp_path / key).write_text(value)
-    assert set(ab.provider_profiles(tmp_path)) == {"brave", "nvidia", "openai"}
+    assert set(ab.provider_profiles(tmp_path)) == {"brave", "gmail", "nvidia", "openai", "slack"}
 
 
 def test_create_script_passes_the_keycloak_it_finds():
@@ -1357,3 +1357,11 @@ def test_egress_allows_an_outside_registry_only_for_pod_pulls():
         assert len(allowed) == len(set(allowed)), url
         assert not [r for r in rules if r["to"].get("dnsName") in
                     ("image-registry.openshift-image-registry.svc", "fedora")], url
+
+
+def test_the_vm_runs_on_arm64_too(default_docs):
+    """UEFI without Secure Boot, and no smm: smm is x86-only (only needed for
+    Secure Boot), and KubeVirt on arm64 refuses it."""
+    domain = default_docs[("VirtualMachine", "saw-test")]["spec"]["template"]["spec"]["domain"]
+    assert domain["firmware"]["bootloader"]["efi"]["secureBoot"] is False
+    assert "smm" not in domain["features"]
