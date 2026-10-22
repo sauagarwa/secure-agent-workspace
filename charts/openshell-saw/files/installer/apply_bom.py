@@ -551,6 +551,13 @@ class Provider:
     inference_timeout: int = 0
     base_url: str = ""
     credential_free: bool = False
+    # Generic passthrough for `provider create --config KEY=VALUE` (non-secret
+    # provider config: base URLs, model names, orgs, ...). `config` is the
+    # declared spec {KEY: {value|secretKey}}; `config_values` is it resolved to
+    # KEY->str (literals at parse-independent resolve time, secretKey from the
+    # provider's Secret). Adding a new knob needs no installer change.
+    config: dict = field(default_factory=dict)
+    config_values: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1282,7 +1289,8 @@ def parse_profiles(files):
                         model=p.get("model", ""),
                         base_url_secret_key=p.get("baseUrlSecretKey", ""),
                         model_secret_key=p.get("modelSecretKey", ""),
-                        inference_timeout=int(p.get("inferenceTimeout", 0) or 0)))
+                        inference_timeout=int(p.get("inferenceTimeout", 0) or 0),
+                        config=p.get("config") or {}))
             if "sandbox.yaml" in docs:
                 key, text = docs["sandbox.yaml"]
                 for s in (_yaml(text, key).get("spec") or {}).get("sandboxes") or []:
@@ -1454,6 +1462,30 @@ def validate_profiles(profiles):
                               f"(supported: {', '.join(sorted(BASE_URL_CONFIG_KEYS))})")
             if p.inference_timeout < 0:
                 errors.append(f"{where}: provider '{p.name}' has a negative inferenceTimeout")
+            if not isinstance(p.config, dict):
+                errors.append(f"{where}: provider '{p.name}' config must be a mapping of "
+                              "KEY to {value|secretKey}")
+            else:
+                for ckey, src in p.config.items():
+                    if not CONFIG_KEY_RE.match(str(ckey)):
+                        errors.append(f"{where}: provider '{p.name}' has an invalid config key "
+                                      f"'{ckey}'")
+                    if not isinstance(src, dict) or ("value" in src) == ("secretKey" in src):
+                        errors.append(f"{where}: provider '{p.name}' config '{ckey}' needs exactly "
+                                      "one of value or secretKey")
+                        continue
+                    if "secretKey" in src:
+                        if not SECRET_KEY_RE.match(str(src["secretKey"])):
+                            errors.append(f"{where}: provider '{p.name}' config '{ckey}' has an "
+                                          "invalid secretKey")
+                        if not p.credential_secret:
+                            errors.append(f"{where}: provider '{p.name}' config '{ckey}' uses "
+                                          "secretKey but the provider has no credentialSecret")
+                    else:
+                        try:
+                            check_config_value(str(src["value"]))
+                        except ValueError as exc:
+                            errors.append(f"{where}: provider '{p.name}' config '{ckey}': {exc}")
         sandbox_names = set()
         for s in ws.sandboxes:
             if not s.enabled:
@@ -1512,7 +1544,21 @@ def resolve_credentials(profiles, secrets_dir):
     creds = {}
     for _, ws in enabled_workspaces(profiles):
         for p in ws.providers:
-            if not p.enabled or p.credential_free:
+            if not p.enabled:
+                continue
+            # Generic config: literals as given, secretKey from the provider's
+            # Secret. Resolved for every enabled provider (keyless included, for
+            # literals); secretKey needs a credentialSecret (validated).
+            if p.config:
+                cfg_base = secrets_dir / p.credential_secret if p.credential_secret else None
+                for ckey, src in p.config.items():
+                    raw = src["value"] if "value" in src else read_secret_value(cfg_base, src["secretKey"])
+                    try:
+                        p.config_values[ckey] = check_config_value(str(raw))
+                    except ValueError as exc:
+                        raise InstallerError(f"provider '{p.name}' in workspace '{ws.name}' "
+                                             f"config '{ckey}': {exc}") from None
+            if p.credential_free:
                 continue
             base = secrets_dir / p.credential_secret
             key_file = base / p.credential_secret_key
@@ -1553,6 +1599,19 @@ def read_secret_value(base, key):
 # Characters a base URL never needs and a shell would interpret; the URL ends
 # up in an OpenClaw command line inside the sandbox.
 SHELL_UNSAFE = set("\"'`$\\;|&<>(){}")
+
+# Generic provider config keys: letters, digits, dot, dash, underscore.
+CONFIG_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def check_config_value(value):
+    """A provider config value safe to place on a command line: it ends up in
+    `provider create --config KEY=VALUE`, and some values (e.g. a base URL)
+    reach an in-sandbox OpenClaw command line. No whitespace, no shell
+    metacharacters. The value is not echoed (it may come from a Secret)."""
+    if any(c.isspace() or c in SHELL_UNSAFE for c in value):
+        raise ValueError("config value has whitespace or shell-unsafe characters")
+    return value
 
 
 def check_base_url(url):
@@ -2827,10 +2886,15 @@ class ProfileApplier:
         else:
             env = {env_name: self.creds[ws.name][provider.name]}
             credential_args = ("--credential", env_name)
-        # A custom endpoint is recorded on the provider; start_openclaw
-        # points the agent at it.
-        config = (("--config", f"{BASE_URL_CONFIG_KEYS[provider.type]}={provider.base_url}")
-                  if provider.base_url else ())
+        # A custom endpoint is recorded on the provider; start_openclaw points
+        # the agent at it. Generic `config:` entries are passed through too, and
+        # may override the base-URL key.
+        config_pairs = {}
+        if provider.base_url:
+            config_pairs[BASE_URL_CONFIG_KEYS[provider.type]] = provider.base_url
+        config_pairs.update(provider.config_values)
+        config = tuple(part for ckey, cval in config_pairs.items()
+                       for part in ("--config", f"{ckey}={cval}"))
         create = ("provider", "create", "--name", provider.name, "--type", provider.type,
                   *ws_args(ws.name), *credential_args, *config)
         created = self.cli(*create, env=env, ok_if_exists=True, check=False)
