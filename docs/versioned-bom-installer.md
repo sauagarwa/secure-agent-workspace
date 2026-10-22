@@ -579,20 +579,29 @@ at most 8 KiB.
   over. Open sessions end; files outside `/sandbox` are not kept. Inference
   changes need no recreation: the agent is onboarded again.
 
-  The files are never put at risk: `/sandbox` (minus the installer's own
-  mounts) is archived and checksummed in the sandbox, downloaded to
-  `<state dir>/sandbox-archives/` and verified; if any of that fails the
-  apply fails and the sandbox is left as it was. Only then is the pending
-  restore recorded (`<state dir>/sandbox-migrations.json`) and the sandbox
-  deleted. After the new sandbox is created the archive is uploaded,
-  verified, unpacked and compared against the archive (`tar -df`); a
-  failure fails the apply and the record stays, so the next apply (or a
-  VM restart) finishes the restore, and an apply interrupted between the
-  delete and the create does the same. The record and the archive are
-  removed only once the restored files verify.
+  The files are never put at risk: `/sandbox` is archived and checksummed
+  in the sandbox, downloaded to `<state dir>/sandbox-archives/` and
+  verified; if any of that fails the apply fails and the sandbox is left as
+  it was. Only the installer's own mounts are left out of the archive, each
+  by its exact path (`harness/`, `.saw/trusted/`, `.saw/audit/`), never by
+  name, so a user's `project/harness/` is kept. Only then is the pending
+  restore recorded (`<state dir>/sandbox-migrations.json`, with the env
+  labels of the sandbox it came from and of its replacement) and the
+  sandbox deleted. After the new sandbox is created the archive is
+  uploaded, verified, unpacked and compared against the archive
+  (`tar -df`); a failure fails the apply and the record stays, so the next
+  apply finishes the restore. The restore only ever goes into the
+  *replacement* (the sandbox carrying the new env label): if the original
+  is still running on the next apply (the delete failed, or the installer
+  stopped before it), it may hold newer work than the archive, so it is
+  archived again and the delete retried, and nothing is restored over it.
+  The record and the archive are removed only once the restored files
+  verify.
 - **`inference.timeoutSeconds`** is OpenClaw's per-provider HTTP request
-  timeout (`models.providers.<provider type>.timeoutSeconds`). NemoClaw's
-  own onboarding has no such setting; the OpenClaw gateway it runs gets it.
+  timeout (`models.providers.<provider type>.timeoutSeconds`); it is unset
+  again when the field is removed (OpenClaw's onboarding keeps an existing
+  provider's settings). NemoClaw's own onboarding has no such setting; the
+  OpenClaw gateway it runs gets it.
 
 ### Credentials by name
 

@@ -229,6 +229,111 @@ def test_an_interrupted_recreation_is_finished_on_the_next_apply(ab, fake_env, c
     assert json.loads(ledger.with_name("sandbox-migrations.json").read_text()) == {}
 
 
+def test_the_backup_excludes_only_the_installers_mounts(ab, tmp_path):
+    """Review (52df5b54, P1): a bare --exclude=harness also drops a user's
+    project/harness/. Run the real archive command against a /sandbox tree."""
+    import subprocess
+    nvidia = ab.Provider(name="nvidia", type="nvidia", credential_secret="inference")
+    sb = ab.Sandbox(name="notebook", type="openclaw", providers=["nvidia"],
+                    harness_ref={"name": "ds-default"})
+    ws = ab.Workspace(name="default", providers=[nvidia], sandboxes=[sb])
+    applier = ab.ProfileApplier(ab.Shell(), {"mtlsGateway": "g"}, {})
+    # Capture the exact `sh -c` script the installer runs in the sandbox.
+    captured = []
+
+    class Captured(Exception):
+        pass
+
+    def capture(*args, **kwargs):
+        captured.append(args[-1])
+        raise Captured()
+    applier.cli = capture
+    with pytest.raises(Captured):
+        applier.preserve_sandbox(ws, sb)
+    script = captured[0]
+    assert "--anchored" in script and "--exclude=harness" not in script
+
+    root = tmp_path / "sandbox"
+    for rel in ("harness/bundle.yaml", ".saw/trusted/gate.mjs", ".saw/audit/log.jsonl",
+                "project/harness/test.py", "project/.saw/notes.md", "notes.md"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(rel)
+    archive = tmp_path / "preserve.tar"
+    run = script.replace("cd /sandbox", f"cd {root}").replace(
+        "/tmp/saw-sandbox-preserve.tar", str(archive))
+    subprocess.run(["sh", "-c", run], check=True, capture_output=True)
+    names = subprocess.run(["tar", "-tf", str(archive)], check=True, capture_output=True,
+                           text=True).stdout.split()
+    kept = {n.lstrip("./") for n in names if not n.endswith("/")}
+    assert "project/harness/test.py" in kept and "project/.saw/notes.md" in kept
+    assert "notes.md" in kept
+    assert not any(n.startswith(("harness/", ".saw/trusted", ".saw/audit")) for n in kept)
+
+
+def test_a_surviving_original_is_never_overwritten_by_its_old_snapshot(
+        ab, fake_env, config, tmp_path, monkeypatch):
+    monkeypatch.setattr(ab.ProfileApplier, "POLL_SECONDS", 0)       # the denied delete's wait
+    """Review (52df5b54, P1): the delete failed (or the installer died before
+    it); the original keeps running and gains new work. The next apply must
+    not restore the stale archive over it: it archives again and retries."""
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    ledger = tmp_path / "state" / "managed.json"
+    cfg = {**config, "prune": {"mode": "off", "ledgerPath": str(ledger)}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "old"}
+    fake_env.set_openshell_state(state)
+
+    # The recreation gets as far as recording the pending restore; the delete
+    # never happens (simulated: deny it).
+    sandbox.env = {"A": {"value": "2"}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    fake_env.deny("sandbox delete")
+    applier = ab.ProfileApplier(ab.Shell(), cfg, creds)
+    with pytest.raises(ab.InstallerError):
+        applier.apply(profiles)
+    pending = json.loads(ledger.with_name("sandbox-migrations.json").read_text())
+    assert pending["default/chat"]["from"] != pending["default/chat"]["to"]
+    original = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert original["env"] == ["A=1"]                              # still the original
+
+    # The user keeps working in it.
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "NEW work"}
+    fake_env.set_openshell_state(state)
+
+    fake_env.deny()                                                # delete allowed again
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    final = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert final["env"] == ["A=2"]
+    assert final["files"] == {"notes.md": "NEW work"}             # the fresh archive, not the stale one
+    assert json.loads(ledger.with_name("sandbox-migrations.json").read_text()) == {}
+
+
+def test_removing_timeout_seconds_unsets_it(ab, fake_env, config, tmp_path):
+    """Review (52df5b54, P2): OpenClaw's onboarding keeps an existing
+    provider's settings, so a removed timeout must be unset explicitly."""
+    vllm = ab.Provider(name="llm", type="openai", credential_secret="inference",
+                       credential_secret_key="api_key")
+    sandbox = ab.Sandbox(name="chat", type="openclaw", providers=["llm"], inference={
+        "providerRef": "llm", "protocol": "openai", "baseUrl": "https://llm.example/v1",
+        "model": "m", "timeoutSeconds": "300"})
+    profiles = _profiles(ab, sandbox, vllm)
+    _secret(tmp_path, "inference", api_key="k")
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ab.ProfileApplier(ab.Shell(), config, creds).apply(profiles)
+    cfg = fake_env.openshell_state()["sandboxes"]["default/chat"]["openclawConfig"]
+    assert cfg["models.providers.openai.timeoutSeconds"] == 300
+
+    del sandbox.inference["timeoutSeconds"]
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ab.ProfileApplier(ab.Shell(), config, creds).apply(profiles)
+    cfg = fake_env.openshell_state()["sandboxes"]["default/chat"]["openclawConfig"]
+    assert "models.providers.openai.timeoutSeconds" not in cfg
+
+
 # --- 3. a custom provider type drives inference by protocol -----------------------------
 
 def test_a_custom_profile_type_onboards_through_the_inference_block(ab, fake_env, config, tmp_path):
