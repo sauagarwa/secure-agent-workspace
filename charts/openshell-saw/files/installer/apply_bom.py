@@ -2777,6 +2777,11 @@ MANAGED_LABEL_KEY = "saw.redhat.com/managed"
 # as a label so a later apply can tell the sandbox no longer matches its
 # profile and recreate it (OpenShell 0.1.x has no way to change it).
 ENV_LABEL_KEY = "saw.redhat.com/env"
+# Each `sandbox create` gets a random instance id as a label. It is the
+# sandbox's identity across a recreation: the env label says what a sandbox
+# was created *with*, which the desired configuration can be rolled back to,
+# so it can never say *which* sandbox this is.
+INSTANCE_LABEL_KEY = "saw.redhat.com/instance"
 # OpenShell 0.0.116 and 0.1.2 print the two kinds differently (confirmed on
 # a 0.0.116 guest, and the same in the 0.1.2 CLI): `sandbox get` human text
 # is one `key: value` line per label and `--output json` has
@@ -3901,30 +3906,6 @@ class ProfileApplier:
         self.prepare_tool_gate(ws, sb)
         self.prepare_harness(ws, sb)
         state = self.sandbox_state(ws, sb)
-        have = None
-        if state == "running" and not self.sh.dry_run:
-            have = self.sandbox_env_label(ws, sb)
-            if have == "":                       # created before the label: had no env
-                have = "none"
-        if state == "running" and self.migrations.get(self.migration_key(ws, sb)):
-            # An earlier recreation did not finish: restore into the
-            # replacement, or retry the delete of a surviving original.
-            if self.finish_migration(ws, sb, have) == "recreating":
-                state = "missing"
-        if state == "running" and have is not None and have != env_label(sb.env_values) \
-                and not self.migrations.get(self.migration_key(ws, sb)):
-            self.recreate_for_env(ws, sb)
-            state = "missing"
-        if state == "running" and not self.sh.dry_run and not self.sandbox_mounts_ok(ws, sb):
-            # Mounts are fixed at create: a sandbox created before its
-            # harnessRef, one that still mounts a harness it no longer has,
-            # or one that mounts another volume there is created again.
-            # OpenShell 0.1.x deletes the per-sandbox /sandbox workspace
-            # volume, including /sandbox/persist. Preserve needed files
-            # separately before a recreation; the harness volume is distinct.
-            log(f"Sandbox '{sb.name}' has stale or missing trusted mounts; recreating it")
-            self.delete_sandbox_and_wait(ws, sb)
-            state = "missing"
         if state == "broken":
             log(f"Sandbox '{sb.name}' reports an error; waiting up to "
                 f"{self.BROKEN_GRACE_SECONDS}s for it to recover")
@@ -3941,6 +3922,32 @@ class ProfileApplier:
             if state != "missing":
                 raise InstallerError(f"sandbox '{sb.name}' was still being deleted after "
                                      f"{self.DELETE_WAIT_SECONDS}s; the next apply recreates it")
+        # The sandbox is now either running (recovered included) or missing:
+        # only now look at what it is, so a recovering sandbox is reconciled
+        # like any other.
+        pending = self.migrations.get(self.migration_key(ws, sb))
+        labels = None
+        if state == "running" and not self.sh.dry_run:
+            labels = self.sandbox_labels(ws, sb)
+        if state == "running" and pending and labels is not None:
+            if self.reconcile_migration(ws, sb, labels) == "recreating":
+                state = "missing"
+            pending = self.migrations.get(self.migration_key(ws, sb))
+        if state == "running" and labels is not None and not pending:
+            have = labels[0] or "none"             # created before the label: had no env
+            if have != env_label(sb.env_values):
+                self.recreate_for_env(ws, sb, labels)
+                state = "missing"
+        if state == "running" and not self.sh.dry_run and not self.sandbox_mounts_ok(ws, sb):
+            # Mounts are fixed at create: a sandbox created before its
+            # harnessRef, one that still mounts a harness it no longer has,
+            # or one that mounts another volume there is created again.
+            # OpenShell 0.1.x deletes the per-sandbox /sandbox workspace
+            # volume, including /sandbox/persist. Preserve needed files
+            # separately before a recreation; the harness volume is distinct.
+            log(f"Sandbox '{sb.name}' has stale or missing trusted mounts; recreating it")
+            self.delete_sandbox_and_wait(ws, sb)
+            state = "missing"
         if state == "running":
             log(f"Sandbox '{sb.name}' already exists")
             self.attach_missing_providers(ws, sb)
@@ -3952,13 +3959,22 @@ class ProfileApplier:
             return
         if sb.image and ("/" in sb.image or ":" in sb.image):
             self.sh.run(["podman", "pull", sb.image], check=False, timeout=900)
-        args = ["sandbox", "create", "--name", sb.name, "--label", MANAGED_LABEL]
-        args += ["--label", f"{ENV_LABEL_KEY}={env_label(sb.env_values)}"]
+        # A pending recreation is completed with the env it was started
+        # for, whatever the profile says now: the restore must land in the
+        # sandbox it was meant for. If the profile changed meanwhile, the
+        # next apply sees the env label differ and recreates again, with
+        # the files carried over once more.
+        pending = self.migrations.get(self.migration_key(ws, sb))
+        env_values = pending["env"] if pending else sb.env_values
+        instance = pending["toInstance"] if pending else secrets.token_hex(8)
+        args = ["sandbox", "create", "--name", sb.name, "--label", MANAGED_LABEL,
+                "--label", f"{ENV_LABEL_KEY}={env_label(env_values)}",
+                "--label", f"{INSTANCE_LABEL_KEY}={instance}"]
         if sb.image:
             args += ["--from", sb.image]
         args += ws_args(ws.name)
         # The workload's environment, for every process in the sandbox.
-        args += env_flags(sb.env_values)
+        args += env_flags(env_values)
         if sandbox_mounts(ws, sb):
             args += ["--driver-config-json", sandbox_mounts_json(ws, sb)]
         for prov in sb.providers:
@@ -3970,8 +3986,12 @@ class ProfileApplier:
         args += ["--no-tty", "--detach", "--", "sh", "-c", "sleep infinity"]
         self.cli(*args, timeout=900)
         self.remember("sandbox", ws.name, sb.name)
-        if self.migrations.get(self.migration_key(ws, sb)):
-            self.finish_migration(ws, sb, env_label(sb.env_values))
+        if pending:
+            self.reconcile_migration(ws, sb, (env_label(env_values), instance))
+            if env_values != sb.env_values:
+                log(f"Sandbox '{sb.name}' was recreated with the environment its recreation "
+                    "started for; the profile has changed since, so the next apply recreates "
+                    "it again (files carried over)")
 
     def attach_missing_providers(self, ws, sb):
         """A sandbox created while one of its providers was skipped (e.g. no
@@ -4622,18 +4642,25 @@ class ProfileApplier:
             return None
         return got.ok and _managed_label_in_text(blob)
 
-    def sandbox_env_label(self, ws, sb):
-        """The env digest a running sandbox was created with ("" for none,
-        None when it cannot be read)."""
+    def sandbox_labels(self, ws, sb):
+        """The env digest and the instance id a running sandbox was created
+        with ("" for an unset label); None when they cannot be read."""
+        keys = (ENV_LABEL_KEY, INSTANCE_LABEL_KEY)
         got = self.cli("sandbox", "get", sb.name, *ws_args(ws.name),
                        "--output", "json", check=False, quiet=True)
         if got.ok:
-            value = _label_from_json(got.out, ENV_LABEL_KEY)
-            return value if value is not None else _label_from_text(got.out, ENV_LABEL_KEY)
+            values = [_label_from_json(got.out, k) for k in keys]
+            if values[0] is None:
+                values = [_label_from_text(got.out, k) for k in keys]
+            return tuple(values)
         if not _cli_rejected_output_flag(got.out + "\n" + got.err):
             return None
         got = self.cli("sandbox", "get", sb.name, *ws_args(ws.name), check=False, quiet=True)
-        return _label_from_text(got.out, ENV_LABEL_KEY) if got.ok else None
+        return tuple(_label_from_text(got.out, k) for k in keys) if got.ok else None
+
+    def sandbox_env_label(self, ws, sb):
+        labels = self.sandbox_labels(ws, sb)
+        return None if labels is None else labels[0]
 
     # /sandbox is the sandbox's workspace volume, which OpenShell 0.1.x
     # deletes with the sandbox. What the installer mounts there itself is
@@ -4718,7 +4745,9 @@ class ProfileApplier:
             raise InstallerError(f"could not restore the files of '{sb.name}' ({why}); the "
                                  "restore is retried on the next apply")
 
-    def drop_migration(self, ws, sb):
+    def complete_migration(self, ws, sb):
+        """The restore verified: forget the record and the archive. The only
+        place the archive is ever deleted."""
         record = self.migrations.pop(self.migration_key(ws, sb), None)
         self.save_migrations()
         if record:
@@ -4727,50 +4756,60 @@ class ProfileApplier:
             except OSError:
                 pass
 
-    def finish_migration(self, ws, sb, have_label):
-        """A recreation is pending for this sandbox and a sandbox of that name
-        is running. Which one it is decides what to do:
+    def reconcile_migration(self, ws, sb, labels):
+        """A recreation is pending for this sandbox (its record holds the
+        archive, the original's instance id `fromInstance`, the env the
+        replacement is to be created with `env`, and the replacement's
+        instance id `toInstance`) and a sandbox of that name is running.
+        Identity is the instance label, never the env label (the desired
+        env can be rolled back, which would make a fresh empty replacement
+        look like the original). Returns what create_sandbox should do:
 
-        - the *replacement* (its env label is the record's `to`): restore the
-          archive into it, verify, forget the record;
-        - the *original* still (its label is the record's `from`: the delete
-          failed or the installer died before it): it may have newer work than
-          the archive, so never restore over it -- archive it again and retry
-          the delete, after which create_sandbox makes the replacement;
-        - anything else: leave it alone and say so."""
-        record = self.migrations.get(self.migration_key(ws, sb))
-        if not record:
-            return "none"
-        if have_label == record["to"]:
+        - "restored": the running sandbox is the replacement; its files are
+          back and the record is gone;
+        - "recreating": the running sandbox is the original (the delete did
+          not happen); it was archived again (replacing the record's archive
+          only once the new one verified) and deleted;
+        - "unknown": neither; nothing is touched."""
+        record = self.migrations[self.migration_key(ws, sb)]
+        env_now, instance = labels
+        if instance and instance == record.get("toInstance"):
             log(f"Finishing the recreation of sandbox '{sb.name}': restoring its files")
             self.wait_exec_ready(ws, sb)
             self.restore_sandbox(ws, sb, record)
-            self.drop_migration(ws, sb)
+            self.complete_migration(ws, sb)
             log(f"Sandbox '{sb.name}': files restored")
             return "restored"
-        if have_label == record["from"]:
-            log(f"Sandbox '{sb.name}' still has its old environment (an earlier recreation did "
-                "not get to delete it); archiving it again and retrying")
-            self.drop_migration(ws, sb)
-            self.recreate_for_env(ws, sb)
+        if instance and instance == record.get("fromInstance"):
+            log(f"Sandbox '{sb.name}' is still the original (an earlier recreation did not get "
+                "to delete it); archiving it again and retrying")
+            fresh = self.preserve_sandbox(ws, sb)       # verified before anything changes
+            old_archive = record["archive"]
+            record.update(fresh)
+            self.save_migrations()
+            if old_archive != fresh["archive"]:
+                try:
+                    Path(old_archive).unlink()
+                except OSError:
+                    pass
+            self.delete_sandbox_and_wait(ws, sb)
             return "recreating"
-        log(f"WARN: sandbox '{sb.name}' has a pending restore but matches neither the sandbox it "
-            f"was taken from nor its replacement; leaving both as they are (archive: "
-            f"{record['archive']})")
+        log(f"WARN: sandbox '{sb.name}' has a pending restore but is neither the sandbox it was "
+            f"taken from nor its replacement (instance {instance or 'unlabelled'}); leaving it "
+            f"and the archive {record['archive']} as they are")
         return "unknown"
 
-    def recreate_for_env(self, ws, sb):
+    def recreate_for_env(self, ws, sb, labels):
         """The running sandbox was created with another environment, which is
         fixed at create (no `sandbox update`): archive its /sandbox, record
-        the pending restore (with the env labels of the sandbox it came from
-        and of its replacement), and only then delete it; create_sandbox
-        makes it again and finish_migration restores the files."""
+        the pending restore, and only then delete it; create_sandbox makes
+        the replacement and restores the files."""
         log(f"Sandbox '{sb.name}' was created with a different environment; recreating it "
             "(its /sandbox files are carried over, open sessions end)")
         self.wait_exec_ready(ws, sb)
         record = self.preserve_sandbox(ws, sb)
-        have = self.sandbox_env_label(ws, sb) or "none"
-        record.update({"from": have, "to": env_label(sb.env_values)})
+        record.update({"fromInstance": labels[1] or "", "env": dict(sb.env_values),
+                       "toInstance": secrets.token_hex(8)})
         self.migrations[self.migration_key(ws, sb)] = record
         self.save_migrations()                       # before the delete: never lost
         self.delete_sandbox_and_wait(ws, sb)

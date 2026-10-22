@@ -590,12 +590,21 @@ at most 8 KiB.
   sandbox deleted. After the new sandbox is created the archive is
   uploaded, verified, unpacked and compared against the archive
   (`tar -df`); a failure fails the apply and the record stays, so the next
-  apply finishes the restore. The restore only ever goes into the
-  *replacement* (the sandbox carrying the new env label): if the original
-  is still running on the next apply (the delete failed, or the installer
-  stopped before it), it may hold newer work than the archive, so it is
-  archived again and the delete retried, and nothing is restored over it.
-  The record and the archive are removed only once the restored files
+  apply finishes the restore. Every `sandbox create` stamps a random
+  `saw.redhat.com/instance` label, and the record names the original's and
+  the replacement's instance: the restore goes only into the sandbox with
+  the replacement's instance, never by env (a desired env can be rolled
+  back, which would make an empty replacement look like the original). If
+  the original is still running on the next apply (the delete failed, or
+  the installer stopped before it), it may hold newer work than the
+  archive, so it is archived again (the old archive replaced only once the
+  new one verified) and the delete retried; nothing is ever restored over
+  it. A pending recreation is completed with the env it was started for,
+  whatever the profile says now; if the profile changed meanwhile, the next
+  apply recreates again, files carried over. A sandbox that reports an
+  error is given time to recover before any of this is decided, so a
+  recovering replacement still gets its restore. The record and the
+  archive are removed in exactly one place: after the restored files
   verify.
 - **`inference.timeoutSeconds`** is OpenClaw's per-provider HTTP request
   timeout (`models.providers.<provider type>.timeoutSeconds`); it is unset
