@@ -118,6 +118,29 @@ PROVIDER_CRED_MAP = {
     "brave": "BRAVE_API_KEY",
     "tavily": "TAVILY_API_KEY",
 }
+
+
+def profile_credential_env(profile_text):
+    """The primary credential env var a provider profile declares
+    (credentials[0].env_vars[0]), or "" when it declares none."""
+    try:
+        doc = yaml.safe_load(profile_text) if profile_text else None
+    except yaml.YAMLError:
+        return ""
+    creds = (doc or {}).get("credentials") or []
+    envs = (creds[0].get("env_vars") or []) if creds else []
+    return envs[0] if envs else ""
+
+
+def credential_env_name(provider_type, profiles):
+    """Env var the installer passes a provider's credential through: the one
+    the provider's own profile declares, else the built-in default. This lets
+    a profile-backed type (github, slack, gmail, ...) work as a provider with
+    no PROVIDER_CRED_MAP edit; for the shipped built-ins the two agree."""
+    return (profile_credential_env((profiles or {}).get(provider_type, ""))
+            or PROVIDER_CRED_MAP.get(provider_type, ""))
+
+
 SANDBOX_TYPES = {"generic", "openclaw", "nemoclaw"}
 # Provider config key that records a provider's base URL. OpenShell 0.1.x has
 # no inference router: the agent calls the endpoint itself (see
@@ -1408,7 +1431,7 @@ def validate_harness(profiles, bundles):
     return revisions
 
 
-def validate_profiles(profiles):
+def validate_profiles(profiles, known_profiles=()):
     """Catch mistakes before anything touches the gateway."""
     errors = []
     seen = {}
@@ -1445,8 +1468,10 @@ def validate_profiles(profiles):
                         or p.base_url or p.inference_timeout):
                     errors.append(f"{where}: keyless provider '{p.name}' cannot be combined "
                                   "with model/inference settings")
-            if not p.credential_free and p.type not in PROVIDER_CRED_MAP:
-                errors.append(f"{where}: provider '{p.name}' has unsupported type '{p.type}'")
+            if (not p.credential_free and p.type not in PROVIDER_CRED_MAP
+                    and p.type not in known_profiles):
+                errors.append(f"{where}: provider '{p.name}' has unsupported type '{p.type}' "
+                              "(no built-in type and no shipped provider profile)")
             if not p.credential_secret and not p.credential_free:
                 errors.append(f"{where}: provider '{p.name}' has no credentialSecret")
             elif p.credential_secret and not SECRET_NAME_RE.match(p.credential_secret):
@@ -2880,7 +2905,7 @@ class ProfileApplier:
         environment variable NAME, so the key never appears in argv
         (/proc/<pid>/cmdline) or in logs."""
         env, credential_args = {}, ()
-        env_name = PROVIDER_CRED_MAP.get(provider.type, "")
+        env_name = credential_env_name(provider.type, self.provider_profiles)
         if provider.credential_free:
             self.check_keyless_profile(ws, provider)
         else:
@@ -3635,7 +3660,7 @@ class ProfileApplier:
         # the real key only for the profile's endpoints and binaries. The
         # placeholder is read inside the sandbox (\$), never by the installer.
         base_url = provider.base_url or NATIVE_BASE_URLS.get(provider.type, "")
-        key_var = PROVIDER_CRED_MAP.get(provider.type, "")
+        key_var = credential_env_name(provider.type, self.provider_profiles)
         auth_choice = (OPENCLAW_AUTH_CHOICES.get(provider.type)
                        if not (provider.base_url or provider.base_url_secret_key) else None)
         if (not base_url and not auth_choice) or not key_var:
@@ -5149,7 +5174,7 @@ class Inputs:
             cfg["ownerSubject"] = subject
         profile_files, harness_files, index = read_profile_files(self.profiles)
         profiles = parse_profiles(profile_files)
-        validate_profiles(profiles)
+        validate_profiles(profiles, set(provider_profiles(self.installer)))
         check_profiles_against_bom(profiles, bom)
         creds = resolve_credentials(profiles, self.secrets)
         bundles = parse_harness_files(harness_files)

@@ -45,6 +45,12 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 
 3. Restart the VM (`make saw-restart`) so the installer applies it.
 
+> The `custom-inference` profile uses the dedicated `baseUrlSecretKey`/
+> `modelSecretKey` fields. The same endpoint config can also be supplied through
+> the generic provider `config:` map (`OPENAI_BASE_URL`), and any profile-backed
+> provider type works without an installer change; see
+> [Provider configuration](versioned-bom-installer.md#provider-configuration).
+
 ## Requirements
 
 - The **gateway VM** must reach the URL, not your laptop: use a cluster Service

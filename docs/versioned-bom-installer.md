@@ -481,6 +481,50 @@ provider with `OPENAI_BASE_URL`, and OpenClaw calls that endpoint directly
 profile and put `provider: openai`, `model`, `url` and `api_key` in the
 `inference` Secret; see [Custom inference](custom-inference.md).
 
+## Provider configuration
+
+### Generic `config:` map
+
+A provider in a profile's `providers.yaml` accepts a generic `config:` map in
+addition to the named fields. Each entry is passed straight to `openshell
+provider create --config KEY=VALUE`, so a new provider-config knob needs no
+installer change:
+
+```yaml
+- name: my-llm
+  type: openai
+  credentialSecret: inference
+  credentialSecretKey: api_key
+  config:
+    OPENAI_ORG:     { value: acme }          # literal
+    OPENAI_PROJECT: { secretKey: project }    # read from the provider's Secret
+```
+
+- A literal `value` is used as given; a `secretKey` is read from the provider's
+  Secret (`/run/saw/secrets/<credentialSecret>/<key>`), so the provider must
+  have a `credentialSecret`.
+- Values must be free of whitespace and shell metacharacters (they reach a
+  command line); the installer rejects anything else without logging the value.
+- `config:` is for **non-secret** provider configuration (base URLs, model
+  names, org/project ids, ...). API keys stay on the credential path
+  (`credentialSecret`/`credentialSecretKey`), which passes the value through an
+  environment variable, never argv. `baseUrl` and `model` keep their dedicated
+  fields because the installer makes onboarding decisions from them (which
+  auth-choice, which model the agent runs).
+
+### Credential environment variable
+
+The env var the installer passes a provider's credential through is read from
+the provider's **profile** (`credentials[0].env_vars[0]` in
+`charts/governance-policy/profiles/<type>.yaml`), falling back to a built-in
+default when no profile ships for the type. So a profile-backed type such as
+`github`, `slack` or `gmail` can be used as a BOM provider without an installer
+change, and validation accepts a provider type whose profile ships with the
+chart. A profile lists `env_vars` as a list so the gateway can expose the same
+credential under several names inside the sandbox (for example `GITHUB_TOKEN`
+and `GH_TOKEN`); the installer passes the value through the first, and the
+gateway exposes all of them.
+
 ## Moving to a new OpenShell release series (0.0.x -> 0.1.x)
 
 OpenShell 0.1.0 cannot upgrade 0.0.x state in place. When `install` replaces
