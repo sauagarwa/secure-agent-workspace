@@ -3091,6 +3091,14 @@ class ProfileApplier:
         self.ledger = Ledger(prune["ledgerPath"], shell.dry_run) if prune.get("ledgerPath") else None
         self.owner_state_path = (Path(prune["ledgerPath"]).with_name("owner-memberships.json")
                                  if prune.get("ledgerPath") else None)
+        # Sandbox recreations in progress (env change): the archive of the
+        # old /sandbox and its checksum, kept until the restore is verified.
+        self.migrations_path = (Path(prune["ledgerPath"]).with_name("sandbox-migrations.json")
+                                if prune.get("ledgerPath") else None)
+        self.migrations = (read_json(self.migrations_path, {})
+                           if self.migrations_path and not shell.dry_run else {})
+        if not isinstance(self.migrations, dict):
+            self.migrations = {}
         self.owner_memberships = (read_json(self.owner_state_path, {})
                                   if self.owner_state_path and not shell.dry_run else {})
         if not isinstance(self.owner_memberships, dict):
@@ -3892,13 +3900,16 @@ class ProfileApplier:
         self.prepare_tool_gate(ws, sb)
         self.prepare_harness(ws, sb)
         state = self.sandbox_state(ws, sb)
-        archive = None
+        if state == "running" and self.migrations.get(self.migration_key(ws, sb)):
+            # The sandbox was created again on an earlier apply but its
+            # files were not restored (or not verified): do that first.
+            self.finish_migration(ws, sb)
         if state == "running" and not self.sh.dry_run:
             have = self.sandbox_env_label(ws, sb)
             if have == "":                       # created before the label: had no env
                 have = "none"
             if have is not None and have != env_label(sb.env_values):
-                archive = self.recreate_for_env(ws, sb)
+                self.recreate_for_env(ws, sb)
                 state = "missing"
         if state == "running" and not self.sh.dry_run and not self.sandbox_mounts_ok(ws, sb):
             # Mounts are fixed at create: a sandbox created before its
@@ -3955,9 +3966,7 @@ class ProfileApplier:
         args += ["--no-tty", "--detach", "--", "sh", "-c", "sleep infinity"]
         self.cli(*args, timeout=900)
         self.remember("sandbox", ws.name, sb.name)
-        if archive is not None:
-            self.wait_exec_ready(ws, sb)
-            self.restore_sandbox(ws, sb, archive)
+        self.finish_migration(ws, sb)
 
     def attach_missing_providers(self, ws, sb):
         """A sandbox created while one of its providers was skipped (e.g. no
@@ -4009,6 +4018,11 @@ class ProfileApplier:
         model = sandbox_model(sb, provider)
         if model:
             env["NEMOCLAW_MODEL"] = model
+        if (sb.inference_values or {}).get("timeoutSeconds"):
+            # NemoClaw's onboarding has no request-timeout setting; the
+            # OpenClaw gateway it runs gets it in start_openclaw.
+            log(f"NOTE: inference.timeoutSeconds of '{sb.name}' applies to its OpenClaw gateway, "
+                "not to nemoclaw onboard (no such setting)")
         if PROVIDER_CRED_MAP.get(nc_provider):
             env[PROVIDER_CRED_MAP[nc_provider]] = credential
         result = self.sh.run(["nemoclaw", "onboard", "--fresh", "--non-interactive",
@@ -4125,6 +4139,15 @@ class ProfileApplier:
             model_id = model if model.startswith(f"{provider.type}/") else f"{provider.type}/{model}"
             self.cli(*exec_cmd, "sh", "-c",
                      f"{oc_env} openclaw models set {shlex.quote(model_id)}", check=False)
+        # The request timeout: OpenClaw's per-provider HTTP timeout
+        # (models.providers.<id>.timeoutSeconds; the custom provider's id is
+        # the --custom-provider-id above, a native one's its type).
+        timeout = (sb.inference_values or {}).get("timeoutSeconds", 0)
+        if timeout:
+            self.cli(*exec_cmd, "sh", "-c",
+                     f"{oc_env} openclaw config set "
+                     f"models.providers.{shlex.quote(provider.type)}.timeoutSeconds {int(timeout)}",
+                     check=False)
         self.configure_harness(ws, sb, exec_cmd, oc_env)
         # Before the gateway process starts, so this boot loads the hook.
         # openclaw_gateway_script restarts only on a harness refill, when none
@@ -4608,60 +4631,112 @@ class ProfileApplier:
 
     # /sandbox is the sandbox's workspace volume, which OpenShell 0.1.x
     # deletes with the sandbox. What the installer mounts there itself is
-    # excluded (it is refilled on create); the rest is carried across.
+    # excluded (it is refilled on create); the rest is carried across a
+    # recreation as a tar archive, kept on the VM until the restore is
+    # verified, so an interrupted or failed restore is finished on a later
+    # apply and the old sandbox is only ever deleted once its files are
+    # safely out.
     PRESERVE_ARCHIVE = "/tmp/saw-sandbox-preserve.tar"
+    PRESERVE_SUM = "/tmp/saw-sandbox-preserve.sha256"
+
+    def migration_key(self, ws, sb):
+        return f"{ws.name}/{sb.name}"
+
+    def save_migrations(self):
+        if self.migrations_path and not self.sh.dry_run:
+            write_json_atomic(self.migrations_path, self.migrations, mode=0o600)
+
+    def archive_dir(self):
+        base = (self.migrations_path.with_name("sandbox-archives") if self.migrations_path
+                else Path(tempfile.gettempdir()) / "saw-sandbox-archives")
+        base.mkdir(parents=True, exist_ok=True)
+        return base
 
     def preserve_sandbox(self, ws, sb):
         """Archive the sandbox's own files (under /sandbox, minus the
-        installer's mounts) and download the archive; the local path, or
-        None when there was nothing (or it could not be read)."""
+        installer's mounts), checksum them in the sandbox, download the
+        archive and verify it. Returns {"archive", "sha256"}; raises when
+        anything fails: the caller must not delete the sandbox then."""
         excludes = " ".join(f"--exclude={shlex.quote(m['target'].lstrip('/'))}"
                             for m in sandbox_mounts(ws, sb))
-        script = (f"cd /sandbox 2>/dev/null || exit 3; tar -cf {self.PRESERVE_ARCHIVE} "
-                  f"{excludes} --exclude=.saw --exclude=harness . 2>/dev/null")
+        script = (f"cd /sandbox || exit 3; tar -cf {self.PRESERVE_ARCHIVE} {excludes} "
+                  f"--exclude=.saw --exclude=harness . && "
+                  f"sha256sum {self.PRESERVE_ARCHIVE} | cut -d' ' -f1")
         packed = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
                           "sh", "-c", script, check=False)
-        if not packed.ok:
-            log(f"WARN: could not archive /sandbox of '{sb.name}' (exit {packed.rc}); "
-                "its files are not carried over")
-            return None
-        local = Path(tempfile.mkdtemp(prefix="saw-preserve-")) / f"{ws.name}-{sb.name}.tar"
+        digest = (packed.out or "").strip().split()[-1] if packed.ok and packed.out.strip() else ""
+        if not packed.ok or (not self.sh.dry_run and not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise InstallerError(
+                f"could not archive /sandbox of '{sb.name}' (exit {packed.rc}); the sandbox is "
+                "left as it is. Fix the sandbox (or set its env back) and apply again")
+        local = self.archive_dir() / f"{ws.name}-{sb.name}-{int(time.time())}.tar"
         got = self.cli("sandbox", "download", sb.name, *ws_args(ws.name),
                        self.PRESERVE_ARCHIVE, str(local), check=False)
-        if not got.ok or (not self.sh.dry_run and not local.is_file()):
-            log(f"WARN: could not download the archive of '{sb.name}'; its files are not "
-                "carried over")
-            return None
-        return local
+        if self.sh.dry_run:
+            return {"archive": str(local), "sha256": digest or "dry-run"}
+        if not got.ok or not local.is_file():
+            raise InstallerError(f"could not download the archive of '{sb.name}'; the sandbox "
+                                 "is left as it is")
+        if sha256_file(local) != digest:
+            local.unlink(missing_ok=True)
+            raise InstallerError(f"the downloaded archive of '{sb.name}' does not match its "
+                                 "checksum; the sandbox is left as it is")
+        return {"archive": str(local), "sha256": digest}
 
-    def restore_sandbox(self, ws, sb, local):
-        """Upload the archive into the new sandbox and unpack it over /sandbox."""
+    def restore_sandbox(self, ws, sb, record):
+        """Upload the archive into the (new) sandbox, verify it there, unpack
+        it over /sandbox and verify what was unpacked. Raises on failure; the
+        migration record stays so the next apply tries again."""
+        local = Path(record["archive"])
+        if not self.sh.dry_run and not local.is_file():
+            raise InstallerError(f"the archive to restore into '{sb.name}' is missing: {local}")
         put = self.cli("sandbox", "upload", sb.name, *ws_args(ws.name), str(local),
                        self.PRESERVE_ARCHIVE, check=False)
-        if put.ok:
-            put = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
-                           "sh", "-c", f"cd /sandbox && tar -xf {self.PRESERVE_ARCHIVE} && "
-                                       f"rm -f {self.PRESERVE_ARCHIVE}", check=False)
         if not put.ok:
-            log(f"WARN: could not restore the files of '{sb.name}' from {local}; "
-                "the archive is kept there")
+            raise InstallerError(f"could not upload the archive into '{sb.name}'; the restore "
+                                 "is retried on the next apply")
+        q = shlex.quote
+        script = (f"[ \"$(sha256sum {self.PRESERVE_ARCHIVE} | cut -d' ' -f1)\" = "
+                  f"{q(record['sha256'])} ] || exit 4; cd /sandbox || exit 3; "
+                  f"tar -xf {self.PRESERVE_ARCHIVE} && tar -df {self.PRESERVE_ARCHIVE} && "
+                  f"rm -f {self.PRESERVE_ARCHIVE}")
+        done = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
+                        "sh", "-c", script, check=False)
+        if not done.ok:
+            why = {3: "no /sandbox", 4: "the uploaded archive does not match its checksum"}.get(
+                done.rc, f"exit {done.rc}")
+            raise InstallerError(f"could not restore the files of '{sb.name}' ({why}); the "
+                                 "restore is retried on the next apply")
+
+    def finish_migration(self, ws, sb):
+        """Restore a sandbox whose recreation was interrupted or whose restore
+        failed on an earlier apply, if one is pending; then forget it."""
+        record = self.migrations.get(self.migration_key(ws, sb))
+        if not record:
             return
+        log(f"Finishing the recreation of sandbox '{sb.name}': restoring its files")
+        self.wait_exec_ready(ws, sb)
+        self.restore_sandbox(ws, sb, record)
+        self.migrations.pop(self.migration_key(ws, sb), None)
+        self.save_migrations()
         try:
-            local.unlink()
-            local.parent.rmdir()
+            Path(record["archive"]).unlink()
         except OSError:
             pass
+        log(f"Sandbox '{sb.name}': files restored")
 
     def recreate_for_env(self, ws, sb):
-        """The running sandbox was created with another environment: an
-        environment is fixed at create (no `sandbox update`), so carry its
-        /sandbox over, delete it, and let create_sandbox make it again."""
+        """The running sandbox was created with another environment, which is
+        fixed at create (no `sandbox update`): archive its /sandbox, record
+        the pending restore, and only then delete it; create_sandbox makes
+        it again and finish_migration restores the files."""
         log(f"Sandbox '{sb.name}' was created with a different environment; recreating it "
             "(its /sandbox files are carried over, open sessions end)")
         self.wait_exec_ready(ws, sb)
-        archive = self.preserve_sandbox(ws, sb)
+        record = self.preserve_sandbox(ws, sb)
+        self.migrations[self.migration_key(ws, sb)] = record
+        self.save_migrations()                       # before the delete: never lost
         self.delete_sandbox_and_wait(ws, sb)
-        return archive
 
     def _sandbox_labeled(self, workspace, name):
         got = self.cli("sandbox", "get", name, *ws_args(workspace),

@@ -11,6 +11,7 @@
 """
 import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
@@ -131,15 +132,101 @@ def test_an_unchanged_env_leaves_the_sandbox_alone(ab, fake_env, config, tmp_pat
     assert ops.count("sandbox create") == 1 and "sandbox delete" not in ops
 
 
-def test_a_failed_archive_still_recreates_but_says_so(ab, fake_env, config, tmp_path, capsys):
+def test_a_failed_backup_never_deletes_the_sandbox(ab, fake_env, config, tmp_path):
+    """Review (bc750ad6, P1): the apply fails and the old sandbox, its files
+    and its env stay exactly as they were."""
     _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
     _secret(tmp_path, "inference", api_key="k")
     _apply(ab, config, tmp_path, profiles)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "keep me"}
+    fake_env.set_openshell_state(state)
     (fake_env.state / "preserve-fail").write_text("")
+
     sandbox.env = {"A": {"value": "2"}}
+    before = len(fake_env.openshell_calls())
+    with pytest.raises(ab.InstallerError, match="could not archive /sandbox of 'chat'.*left as it is"):
+        _apply(ab, config, tmp_path, profiles)
+    after = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert after["env"] == ["A=1"] and after["files"] == {"notes.md": "keep me"}
+    ops = [" ".join(c[:2]) for c in fake_env.openshell_calls()[before:]]
+    assert "sandbox delete" not in ops and "sandbox create" not in ops
+
+
+def test_a_download_mismatch_never_deletes_the_sandbox(ab, fake_env, config, tmp_path, monkeypatch):
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
     _apply(ab, config, tmp_path, profiles)
-    assert fake_env.openshell_state()["sandboxes"]["default/chat"]["env"] == ["A=2"]
-    assert "not carried over" in capsys.readouterr().out
+    monkeypatch.setattr(ab, "sha256_file", lambda path: "0" * 64)     # a corrupt download
+    sandbox.env = {"A": {"value": "2"}}
+    with pytest.raises(ab.InstallerError, match="does not match its checksum"):
+        _apply(ab, config, tmp_path, profiles)
+    assert fake_env.openshell_state()["sandboxes"]["default/chat"]["env"] == ["A=1"]
+
+
+def test_a_failed_restore_fails_the_apply_and_is_retried(ab, fake_env, config, tmp_path):
+    """Review (bc750ad6, P1): a restore failure is an error, the pending
+    restore is recorded on the VM, and the next apply finishes it; the
+    migration is complete only once the restored files verify."""
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    ledger = tmp_path / "state" / "managed.json"
+    cfg = {**config, "prune": {"mode": "off", "ledgerPath": str(ledger)}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "keep me"}
+    fake_env.set_openshell_state(state)
+
+    (fake_env.state / "restore-fail").write_text("")
+    sandbox.env = {"A": {"value": "2"}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    with pytest.raises(ab.InstallerError, match="could not restore the files of 'chat'.*retried"):
+        ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    # The new sandbox exists with the new env, but the files are not there
+    # yet, and the pending restore is persisted with its archive.
+    new = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert new["env"] == ["A=2"] and "notes.md" not in new.get("files", {})
+    pending = json.loads(ledger.with_name("sandbox-migrations.json").read_text())
+    assert set(pending) == {"default/chat"}
+    assert Path(pending["default/chat"]["archive"]).is_file()
+
+    (fake_env.state / "restore-fail").unlink()
+    before = len(fake_env.openshell_calls())
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)       # same env: no recreation
+    ops = [" ".join(c[:2]) for c in fake_env.openshell_calls()[before:]]
+    assert "sandbox delete" not in ops and "sandbox create" not in ops
+    assert "sandbox upload" in ops
+    final = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert final["files"] == {"notes.md": "keep me"} and final["env"] == ["A=2"]
+    assert json.loads(ledger.with_name("sandbox-migrations.json").read_text()) == {}
+    assert not Path(pending["default/chat"]["archive"]).exists()
+
+
+def test_an_interrupted_recreation_is_finished_on_the_next_apply(ab, fake_env, config, tmp_path):
+    """Killed between delete and create: the record and archive survive, the
+    next apply creates the sandbox and restores the files."""
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    ledger = tmp_path / "state" / "managed.json"
+    cfg = {**config, "prune": {"mode": "off", "ledgerPath": str(ledger)}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    applier = ab.ProfileApplier(ab.Shell(), cfg, creds)
+    applier.apply(profiles)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "keep me"}
+    fake_env.set_openshell_state(state)
+    sandbox.env = {"A": {"value": "2"}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ws = profiles[0].workspaces[0]
+    applier = ab.ProfileApplier(ab.Shell(), cfg, creds)
+    applier.recreate_for_env(ws, sandbox)                              # ...and the installer dies here
+    assert "default/chat" not in fake_env.openshell_state()["sandboxes"]
+
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    final = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert final["files"] == {"notes.md": "keep me"} and final["env"] == ["A=2"]
+    assert json.loads(ledger.with_name("sandbox-migrations.json").read_text()) == {}
 
 
 # --- 3. a custom provider type drives inference by protocol -----------------------------
@@ -170,6 +257,9 @@ def test_a_custom_profile_type_onboards_through_the_inference_block(ab, fake_env
     assert "--custom-base-url https://vllm.models.example/v1 " in onboard
     assert "--custom-model-id llama-3.1-8b " in onboard
     assert 'CUSTOM_API_KEY="$VLLM_API_KEY"' in onboard
+    # Review (bc750ad6, P2): timeoutSeconds reaches the agent's configuration.
+    assert state["sandboxes"]["default/chat"]["openclawConfig"][
+        "models.providers.vllm-prod.timeoutSeconds"] == 300
 
 
 def test_provider_ref_picks_the_inference_provider(ab, fake_env, config, tmp_path):
