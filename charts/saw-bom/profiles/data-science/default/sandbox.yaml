@@ -19,6 +19,14 @@ spec:
       #                                  published by CI from harness-bundles/
       harnessRef:
         name: ds-default
+      # The model the agent runs: the `inference` Secret's `model`, else
+      # this default (the RHDH form pre-fills it).
+      env:
+        MODEL:
+          secret: inference
+          secretKey: model
+          default: nvidia/nemotron-3.5-lightning-30b-a3b
+          title: Model
       # ui.route: publish the agent's web UI (OpenClaw control UI, port
       # 18789) on its own route, <user>-<workspace>-<sandbox>-ui, behind an
       # oauth2-proxy that signs in with Keycloak and admits only the

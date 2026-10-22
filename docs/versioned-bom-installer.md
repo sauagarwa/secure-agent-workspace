@@ -481,52 +481,78 @@ provider with `OPENAI_BASE_URL`, and OpenClaw calls that endpoint directly
 profile and put `provider: openai`, `model`, `url` and `api_key` in the
 `inference` Secret; see [Custom inference](custom-inference.md).
 
-## Provider configuration
+## Providers and sandbox environment
 
-### Generic `config:` map
+OpenShell splits the two concerns, and the BOM follows it
+([providers](https://docs.nvidia.com/openshell/v0.1.2/how-it-works/providers/overview),
+[inference](https://docs.nvidia.com/openshell/v0.1.2/how-it-works/inference),
+[sandboxes](https://docs.nvidia.com/openshell/v0.1.2/how-it-works/sandboxes/overview)):
 
-A provider in a profile's `providers.yaml` accepts a generic `config:` map in
-addition to the named fields. Each entry is passed straight to `openshell
-provider create --config KEY=VALUE`, so a new provider-config knob needs no
-installer change:
+- a **provider** (`providers.yaml`) holds credentials. The sandbox gets a
+  placeholder; the proxy puts in the real value only for the profile's
+  endpoints. *"Provider attachment does not select or rewrite a model."*
+- the **workload** owns its endpoint, model and other settings: a
+  sandbox's `env:` (`sandbox.yaml`), passed as `sandbox create --env`.
+
+### Sandbox `env:`
 
 ```yaml
-- name: my-llm
-  type: openai
-  credentialSecret: inference
-  credentialSecretKey: api_key
-  config:
-    OPENAI_ORG:     { value: acme }          # literal
-    OPENAI_PROJECT: { secretKey: project }    # read from the provider's Secret
+sandboxes:
+  - name: notebook
+    type: openclaw
+    providers: [custom]
+    env:
+      OPENAI_BASE_URL:            # from a Secret, asked for in the RHDH form
+        secret: inference
+        secretKey: url
+        title: Endpoint base URL (OpenAI-compatible, ending in /v1)
+      MODEL:
+        secret: inference
+        secretKey: model
+        default: meta-llama/Llama-3.1-8B-Instruct   # pre-fills the form; used if the Secret has no value
+      HF_HUB_OFFLINE: { value: "1" }                 # literal, fixed by the profile
 ```
 
-- A literal `value` is used as given; a `secretKey` is read from the provider's
-  Secret (`/run/saw/secrets/<credentialSecret>/<key>`), so the provider must
-  have a `credentialSecret`.
-- Values must be free of whitespace and shell metacharacters (they reach a
-  command line); the installer rejects anything else without logging the value.
-- `config:` is for **non-secret** provider configuration (base URLs, model
-  names, org/project ids, ...). API keys stay on the credential path
-  (`credentialSecret`/`credentialSecretKey`), which passes the value through an
-  environment variable, never argv.
-- The provider type's base-URL key (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`,
-  `NVIDIA_BASE_URL`) is the provider's **endpoint**, exactly like
-  `baseUrlSecretKey`: it is validated as a base URL (http(s), no localhost, no
-  embedded credentials) and OpenClaw is onboarded against it
-  (`custom-api-key`) instead of the native API. A base-URL key that belongs to
-  another type is rejected.
-- An entry may carry a `title`, used as the label of the field the RHDH
-  "create workspace" form asks for. Every `secretKey` entry becomes a form
-  field (`url` kind when the key contains `URL`, text otherwise); literal
-  `value` entries are fixed in the profile and not asked for.
+- An entry is a literal `value`, or `secret` + `secretKey` read from
+  `/run/saw/secrets/<secret>/<key>` (the Secret must be mounted: it is
+  `inference.secretName` or listed in `additionalProviderSecrets`, which
+  `saw-users` does for the Secrets the catalog names), with an optional
+  `default` and `title`.
+- Every value goes into `sandbox create --env`, and into each `sandbox exec`
+  the installer runs (`--env`), so an agent in a sandbox created before a
+  change still gets the current values. A changed env changes the OpenClaw
+  gateway's fingerprint, so the gateway restarts with it.
+- Names follow OpenShell's rule (`[A-Za-z_][A-Za-z0-9_]*`, `OPENSHELL_*`
+  reserved), values are one line of at most 8 KiB.
+- **Not for credentials.** The agent can read sandbox env. A name that is a
+  provider credential variable (`NVIDIA_API_KEY`, ...) or any `env_vars` name
+  of an attached provider's profile (`GITHUB_TOKEN`, `GH_TOKEN`, ...) is
+  rejected.
+- Values are plain `--env` arguments of the `openshell` CLI on the VM; keep
+  them non-secret.
+- The RHDH "create workspace" form asks for every `secret` entry (a `url`
+  field when the name contains `URL`, `title` as the label, `default`
+  pre-filled); literals are not asked for.
 
-### Model from the Secret
+### Endpoint and model of the agents the installer sets up
 
-`model` is the default; `modelSecretKey` reads the model from the provider's
-Secret and overrides it. The `data-science` profile's `nvidia` providers use
-`modelSecretKey: model`, so the `inference` Secret's `model` (and the Model
-field of the RHDH form, which defaults to the profile's model) decides which
-model the sandboxes run.
+The installer onboards OpenClaw (and starts NemoClaw) itself, so it reads
+two settings from the sandbox env:
+
+- **endpoint**: the provider type's base-URL variable (`OPENAI_BASE_URL`,
+  `ANTHROPIC_BASE_URL`, `NVIDIA_BASE_URL`). When set, it is validated as a
+  base URL (http(s), no localhost, no credentials, query or fragment) and
+  OpenClaw is onboarded against it (`custom-api-key`); otherwise the native
+  API of an official provider is used. The older provider-level
+  `baseUrlSecretKey` is still accepted.
+- **model**: the agent's own variable first (`OPENCLAW_MODEL` in an
+  `openclaw` sandbox, `NEMOCLAW_MODEL` in a `nemoclaw` one), then `MODEL`,
+  then the sandbox `model`, the provider's `model` / `modelSecretKey`, and
+  the built-in default.
+
+The shipped `custom-inference` profile takes `OPENAI_BASE_URL` and `MODEL`
+from the `inference` Secret; `data-science` takes `MODEL` from it, defaulting
+to the profile's model.
 
 ### Credentials array
 
@@ -562,11 +588,6 @@ chart. A profile lists `env_vars` as a list so the gateway can expose the same
 credential under several names inside the sandbox (for example `GITHUB_TOKEN`
 and `GH_TOKEN`); the installer passes the value through the first, and the
 gateway exposes all of them.
-
-A sandbox gets these variables only through the providers it lists in
-`sandbox.yaml` (`providers:`), each holding a placeholder that the egress proxy
-swaps for the real value on requests to the profile's endpoints. There is no
-sandbox-level `env:` in the BOM: credentials must stay on the provider path.
 
 ## Moving to a new OpenShell release series (0.0.x -> 0.1.x)
 

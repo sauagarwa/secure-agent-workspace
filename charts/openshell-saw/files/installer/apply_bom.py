@@ -134,6 +134,17 @@ def profile_credential_envs(profile_text):
     return out
 
 
+def profile_all_credential_envs(profile_text):
+    """Every env var any credential of a provider profile is exposed under
+    (all of credentials[].env_vars, e.g. GITHUB_TOKEN and GH_TOKEN)."""
+    try:
+        doc = yaml.safe_load(profile_text) if profile_text else None
+    except yaml.YAMLError:
+        return set()
+    return {env for cred in (doc or {}).get("credentials") or [] if isinstance(cred, dict)
+            for env in (cred.get("env_vars") or [])}
+
+
 def profile_credential_env(profile_text):
     """The primary credential env var a provider profile declares
     (credentials[0].env_vars[0]), or "" when it declares none."""
@@ -583,13 +594,6 @@ class Provider:
     inference_timeout: int = 0
     base_url: str = ""
     credential_free: bool = False
-    # Generic passthrough for `provider create --config KEY=VALUE` (non-secret
-    # provider config: base URLs, model names, orgs, ...). `config` is the
-    # declared spec {KEY: {value|secretKey}}; `config_values` is it resolved to
-    # KEY->str (literals at parse-independent resolve time, secretKey from the
-    # provider's Secret). Adding a new knob needs no installer change.
-    config: dict = field(default_factory=dict)
-    config_values: dict = field(default_factory=dict)
     # Optional `credentials:` array. The first entry is the primary credential
     # (same as credentialSecretKey); the rest are extra values from the same
     # Secret, each passed as its own `--credential ENV`, ENV taken from the
@@ -608,6 +612,12 @@ class Sandbox:
     providers: list = field(default_factory=list)
     model: str = ""
     harness_ref: dict = field(default_factory=dict)
+    # `env:` -- the workload's environment: `sandbox create --env` and every
+    # `sandbox exec` the installer runs. {NAME: {value: ...} | {secret,
+    # secretKey, default?, title?}}; env_values is it resolved. Never for
+    # credentials (the agent can read these): those stay on providers.
+    env: dict = field(default_factory=dict)
+    env_values: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1335,7 +1345,6 @@ def parse_profiles(files):
                         base_url_secret_key=p.get("baseUrlSecretKey", ""),
                         model_secret_key=p.get("modelSecretKey", ""),
                         inference_timeout=int(p.get("inferenceTimeout", 0) or 0),
-                        config=p.get("config") or {},
                         credentials_spec=cred_spec if cred_spec is not None else []))
             if "sandbox.yaml" in docs:
                 key, text = docs["sandbox.yaml"]
@@ -1349,7 +1358,8 @@ def parse_profiles(files):
                         image=s.get("image", ""),
                         providers=list(s.get("providers") or []),
                         model=s.get("model", ""),
-                        harness_ref=dict(s.get("harnessRef") or {})))
+                        harness_ref=dict(s.get("harnessRef") or {}),
+                        env=s.get("env") if s.get("env") is not None else {}))
             profile.workspaces.append(ws)
         profiles.append(profile)
     return profiles
@@ -1510,35 +1520,6 @@ def validate_profiles(profiles, known_profiles=()):
                               f"(supported: {', '.join(sorted(BASE_URL_CONFIG_KEYS))})")
             if p.inference_timeout < 0:
                 errors.append(f"{where}: provider '{p.name}' has a negative inferenceTimeout")
-            if not isinstance(p.config, dict):
-                errors.append(f"{where}: provider '{p.name}' config must be a mapping of "
-                              "KEY to {value|secretKey}")
-            else:
-                for ckey, src in p.config.items():
-                    if (ckey in BASE_URL_CONFIG_KEYS.values()
-                            and BASE_URL_CONFIG_KEYS.get(p.type) != ckey):
-                        errors.append(f"{where}: provider '{p.name}' of type '{p.type}' does not "
-                                      f"take a base URL ({ckey}; supported: "
-                                      f"{', '.join(sorted(BASE_URL_CONFIG_KEYS))})")
-                    if not CONFIG_KEY_RE.match(str(ckey)):
-                        errors.append(f"{where}: provider '{p.name}' has an invalid config key "
-                                      f"'{ckey}'")
-                    if not isinstance(src, dict) or ("value" in src) == ("secretKey" in src):
-                        errors.append(f"{where}: provider '{p.name}' config '{ckey}' needs exactly "
-                                      "one of value or secretKey")
-                        continue
-                    if "secretKey" in src:
-                        if not SECRET_KEY_RE.match(str(src["secretKey"])):
-                            errors.append(f"{where}: provider '{p.name}' config '{ckey}' has an "
-                                          "invalid secretKey")
-                        if not p.credential_secret:
-                            errors.append(f"{where}: provider '{p.name}' config '{ckey}' uses "
-                                          "secretKey but the provider has no credentialSecret")
-                    else:
-                        try:
-                            check_config_value(str(src["value"]))
-                        except ValueError as exc:
-                            errors.append(f"{where}: provider '{p.name}' config '{ckey}': {exc}")
             if p.credentials_spec:
                 if not isinstance(p.credentials_spec, list):
                     errors.append(f"{where}: provider '{p.name}' credentials must be a list of "
@@ -1577,6 +1558,13 @@ def validate_profiles(profiles, known_profiles=()):
                     errors.append(f"{where}: sandbox '{s.name}' uses provider '{ref}' which is not an enabled provider in this workspace")
             if s.type in ("openclaw", "nemoclaw") and not provider_names:
                 errors.append(f"{where}: {s.type} sandbox '{s.name}' needs at least one provider")
+            if not isinstance(s.env, dict):
+                errors.append(f"{where}: sandbox '{s.name}' env must be a mapping of NAME to "
+                              "{value} or {secret, secretKey}")
+            else:
+                for name, src in s.env.items():
+                    errors += [f"{where}: sandbox '{s.name}' env '{name}' {problem}"
+                               for problem in sandbox_env_problems(name, src)]
     if errors:
         raise InstallerError("invalid profiles:\n  - " + "\n  - ".join(errors))
 
@@ -1621,28 +1609,6 @@ def resolve_credentials(profiles, secrets_dir):
         for p in ws.providers:
             if not p.enabled:
                 continue
-            # Generic config: literals as given, secretKey from the provider's
-            # Secret. Resolved for every enabled provider (keyless included, for
-            # literals); secretKey needs a credentialSecret (validated).
-            if p.config:
-                cfg_base = secrets_dir / p.credential_secret if p.credential_secret else None
-                bkey = BASE_URL_CONFIG_KEYS.get(p.type)
-                for ckey, src in p.config.items():
-                    raw = src["value"] if "value" in src else read_secret_value(cfg_base, src["secretKey"])
-                    try:
-                        if ckey == bkey:
-                            # The provider's endpoint, exactly like
-                            # baseUrlSecretKey: validated as a base URL, and
-                            # onboarding points the agent at it (custom-api-key).
-                            p.config_values[ckey] = check_base_url(str(raw))
-                        else:
-                            p.config_values[ckey] = check_config_value(str(raw))
-                    except ValueError as exc:
-                        raise InstallerError(f"provider '{p.name}' in workspace '{ws.name}': {exc} "
-                                             f"(config '{ckey}')") from None
-                if (bkey and bkey in p.config_values
-                        and not p.base_url and not p.base_url_secret_key):
-                    p.base_url = p.config_values[bkey]
             if p.credential_free:
                 continue
             base = secrets_dir / p.credential_secret
@@ -1680,6 +1646,9 @@ def resolve_credentials(profiles, secrets_dir):
                         f"not found: Secret '{p.credential_secret}' key '{entry['secretKey']}'")
                 p.extra_credential_values.append((entry, extra))
             creds.setdefault(ws.name, {})[p.name] = value
+        for sb in ws.sandboxes:
+            if sb.enabled and isinstance(sb.env, dict) and sb.env:
+                sb.env_values = resolve_sandbox_env(ws, sb, secrets_dir)
     return creds
 
 
@@ -1694,20 +1663,107 @@ def read_secret_value(base, key):
 # up in an OpenClaw command line inside the sandbox.
 SHELL_UNSAFE = set("\"'`$\\;|&<>(){}")
 
-# Generic provider config keys: letters, digits, dot, dash, underscore.
-CONFIG_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-# Environment variable names (a credential's `env`).
+# Environment variable names (a credential's `env`, a sandbox `env:` key);
+# OpenShell's own rule for `sandbox create --env`.
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# OpenShell's limit for one `--env` value.
+ENV_VALUE_LIMIT = 8192
+SANDBOX_ENV_KEYS = {"value", "secret", "secretKey", "default", "title"}
+# The model an agent runs comes from the sandbox env: the agent's own
+# variable first, then MODEL (then the sandbox `model`, the provider's
+# `model`, the built-in default).
+AGENT_MODEL_ENV = {"openclaw": "OPENCLAW_MODEL", "nemoclaw": "NEMOCLAW_MODEL"}
 
 
-def check_config_value(value):
-    """A provider config value safe to place on a command line: it ends up in
-    `provider create --config KEY=VALUE`, and some values (e.g. a base URL)
-    reach an in-sandbox OpenClaw command line. No whitespace, no shell
-    metacharacters. The value is not echoed (it may come from a Secret)."""
-    if any(c.isspace() or c in SHELL_UNSAFE for c in value):
-        raise ValueError("config value has whitespace or shell-unsafe characters")
+def check_env_value(value):
+    """A value OpenShell accepts for `--env`: one line, at most 8 KiB. The
+    value is not echoed (it may come from a Secret)."""
+    if "\n" in value or "\r" in value or "\0" in value:
+        raise ValueError("value must be a single line")
+    if len(value.encode()) > ENV_VALUE_LIMIT:
+        raise ValueError(f"value is longer than {ENV_VALUE_LIMIT} bytes")
     return value
+
+
+def sandbox_env_problems(name, src):
+    """What is wrong with one `env:` entry of a sandbox ([] when fine)."""
+    out = []
+    if not ENV_NAME_RE.match(str(name)):
+        out.append("is not a valid variable name ([A-Za-z_][A-Za-z0-9_]*)")
+    elif str(name).startswith("OPENSHELL_"):
+        out.append("is reserved by OpenShell (OPENSHELL_*)")
+    elif name in set(PROVIDER_CRED_MAP.values()):
+        out.append("is a provider credential variable; credentials go on a provider, "
+                   "the agent can read sandbox env")
+    if not isinstance(src, dict) or ("value" in src) == ("secretKey" in src):
+        return out + ["needs exactly one of value or secretKey"]
+    unknown = sorted(set(src) - SANDBOX_ENV_KEYS)
+    if unknown:
+        out.append(f"has unknown keys {', '.join(unknown)}")
+    if "secretKey" in src:
+        if not SECRET_NAME_RE.match(str(src.get("secret", ""))):
+            out.append("needs a valid secret (the Secret to read secretKey from)")
+        if not SECRET_KEY_RE.match(str(src["secretKey"])):
+            out.append("has an invalid secretKey")
+    for field_name in ("value", "default"):
+        if field_name not in src:
+            continue
+        if isinstance(src[field_name], bool) or not isinstance(src[field_name], (str, int, float)):
+            out.append(f"{field_name} must be a string (quote it)")
+            continue
+        try:
+            check_env_value(str(src[field_name]))
+        except ValueError as exc:
+            out.append(f"{field_name}: {exc}")
+    return out
+
+
+def resolve_sandbox_env(ws, sb, secrets_dir):
+    """A sandbox's env resolved to NAME -> value: literals as given, secretKey
+    from /run/saw/secrets/<secret>/<key>, else its default."""
+    out = {}
+    for name in sorted(sb.env):
+        src = sb.env[name]
+        if "value" in src:
+            value = str(src["value"])
+        else:
+            value = read_secret_value(Path(secrets_dir) / src["secret"], src["secretKey"])
+            if not value:
+                if "default" not in src:
+                    raise InstallerError(
+                        f"sandbox '{sb.name}' in workspace '{ws.name}': env '{name}' not found: "
+                        f"Secret '{src['secret']}' key '{src['secretKey']}'. List the Secret in "
+                        "openshell-saw additionalProviderSecrets and make sure it exists.")
+                value = str(src["default"])
+        try:
+            check_env_value(value)
+            if name in BASE_URL_CONFIG_KEYS.values():
+                value = check_base_url(value)
+        except ValueError as exc:
+            raise InstallerError(f"sandbox '{sb.name}' in workspace '{ws.name}': "
+                                 f"env '{name}': {exc}") from None
+        out[name] = value
+    return out
+
+
+def env_flags(values):
+    """`--env NAME=VALUE` for each value (argv, not a shell: no quoting)."""
+    return [part for name, value in sorted(values.items())
+            for part in ("--env", f"{name}={value}")]
+
+
+def sandbox_model(sb, provider, default=""):
+    env = sb.env_values or {}
+    return (env.get(AGENT_MODEL_ENV.get(sb.type, ""), "") or env.get("MODEL", "") or sb.model
+            or (provider.model if provider else "") or default)
+
+
+def sandbox_endpoint(sb, provider):
+    """The provider's endpoint for this sandbox: the type's *_BASE_URL in the
+    sandbox env, else the provider's own base URL ("" = native API)."""
+    key = BASE_URL_CONFIG_KEYS.get(provider.type, "")
+    env_url = (sb.env_values or {}).get(key, "") if key else ""
+    return env_url or provider.base_url
 
 
 def check_base_url(url):
@@ -2969,6 +3025,29 @@ class ProfileApplier:
             if self.owner_state_path and not self.sh.dry_run:
                 write_json_atomic(self.owner_state_path, self.owner_memberships, mode=0o600)
 
+    def exec_args(self, ws, sb):
+        """`sandbox exec -n <sb>` for one of the installer's commands, with the
+        sandbox's env (`--env`): a sandbox created before an env change still
+        runs the agent with the current values (per-command env overrides
+        the sandbox-level one)."""
+        return ("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), *env_flags(sb.env_values))
+
+    def check_sandbox_env(self, ws, sb):
+        """No sandbox env variable may shadow a credential variable of a
+        provider the sandbox has: the agent would read the plain value."""
+        for prov in ws.providers:
+            if prov.name not in sb.providers:
+                continue
+            names = profile_all_credential_envs(self.provider_profiles.get(prov.type, ""))
+            names.add(credential_env_name(prov.type, self.provider_profiles))
+            names.discard("")
+            clash = sorted(names & set(sb.env_values))
+            if clash:
+                raise InstallerError(
+                    f"sandbox '{sb.name}' in workspace '{ws.name}': env {', '.join(clash)} is the "
+                    f"credential variable of provider '{prov.name}'; keep credentials on the "
+                    "provider (the agent can read sandbox env)")
+
     def apply_provider(self, ws, provider):
         """Create the provider; if it exists, push the current key to it.
 
@@ -2999,15 +3078,10 @@ class ProfileApplier:
                 self.sh.add_secret(value)
                 env[extra_env] = value
                 credential_args += ("--credential", extra_env)
-        # A custom endpoint is recorded on the provider; start_openclaw points
-        # the agent at it. Generic `config:` entries are passed through too, and
-        # may override the base-URL key.
-        config_pairs = {}
-        if provider.base_url:
-            config_pairs[BASE_URL_CONFIG_KEYS[provider.type]] = provider.base_url
-        config_pairs.update(provider.config_values)
-        config = tuple(part for ckey, cval in config_pairs.items()
-                       for part in ("--config", f"{ckey}={cval}"))
+        # A custom endpoint is recorded on the provider; start_openclaw
+        # points the agent at it.
+        config = (("--config", f"{BASE_URL_CONFIG_KEYS[provider.type]}={provider.base_url}")
+                  if provider.base_url else ())
         create = ("provider", "create", "--name", provider.name, "--type", provider.type,
                   *ws_args(ws.name), *credential_args, *config)
         created = self.cli(*create, env=env, ok_if_exists=True, check=False)
@@ -3259,7 +3333,7 @@ class ProfileApplier:
         if log_file.is_symlink() or (log_file.exists() and not stat.S_ISREG(log_file.stat().st_mode)):
             raise InstallerError(f"audit path {log_file} is not a regular file")
         if not log_file.exists():
-            exec_cmd = ("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--")
+            exec_cmd = (*self.exec_args(ws, sb), "--no-tty", "--")
             uid = self.cli(*exec_cmd, "id", "-u", quiet=True).out.strip()
             gid = self.cli(*exec_cmd, "id", "-g", quiet=True).out.strip()
             if not uid.isdigit() or not gid.isdigit():
@@ -3627,17 +3701,20 @@ class ProfileApplier:
             log(f"Sandbox '{sb.name}' already exists")
             self.attach_missing_providers(ws, sb)
             if sb.harness_ref and configure_harness:
-                exec_cmd = ["sandbox", "exec", "-n", sb.name, *ws_args(ws.name),
+                exec_cmd = [*self.exec_args(ws, sb),
                             "--no-tty", "--"]
                 self.configure_harness(ws, sb, exec_cmd, OPENCLAW_EXEC_ENV)
             self.remember("sandbox", ws.name, sb.name)
             return
         if sb.image and ("/" in sb.image or ":" in sb.image):
             self.sh.run(["podman", "pull", sb.image], check=False, timeout=900)
+        self.check_sandbox_env(ws, sb)
         args = ["sandbox", "create", "--name", sb.name, "--label", MANAGED_LABEL]
         if sb.image:
             args += ["--from", sb.image]
         args += ws_args(ws.name)
+        # The workload's environment, for every process in the sandbox.
+        args += env_flags(sb.env_values)
         if sandbox_mounts(ws, sb):
             args += ["--driver-config-json", sandbox_mounts_json(ws, sb)]
         for prov in sb.providers:
@@ -3697,8 +3774,9 @@ class ProfileApplier:
             "NEMOCLAW_PROVIDER": nc_provider,
             "NEMOCLAW_PROVIDER_KEY": credential,
         }
-        if sb.model or provider.model:
-            env["NEMOCLAW_MODEL"] = sb.model or provider.model
+        model = sandbox_model(sb, provider)
+        if model:
+            env["NEMOCLAW_MODEL"] = model
         if PROVIDER_CRED_MAP.get(nc_provider):
             env[PROVIDER_CRED_MAP[nc_provider]] = credential
         result = self.sh.run(["nemoclaw", "onboard", "--fresh", "--non-interactive",
@@ -3719,7 +3797,7 @@ class ProfileApplier:
         deadline = time.monotonic() + self.EXEC_READY_SECONDS
         attempt = 0
         while True:
-            probe = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
+            probe = self.cli(*self.exec_args(ws, sb), "--no-tty", "--",
                              "true", check=False, quiet=True)
             if probe.ok:
                 return True
@@ -3734,23 +3812,26 @@ class ProfileApplier:
     def start_openclaw(self, ws, sb, provider):
         """Onboard openclaw inside the sandbox and start its web gateway.
         These steps are best effort, as before; verification decides."""
-        exec_cmd = ["sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--"]
+        exec_cmd = [*self.exec_args(ws, sb), "--no-tty", "--"]
         self.wait_exec_ready(ws, sb)
         self.finalize_tool_audit(ws, sb)
         # No /sandbox chown: OpenShell 0.1.x runs the workload without
         # capabilities (root in the container cannot even read /sandbox) and
         # already gives /sandbox to the image's user.
-        model = sb.model or provider.model or "nvidia/nemotron-3.5-lightning-30b-a3b"
+        model = sandbox_model(sb, provider, "nvidia/nemotron-3.5-lightning-30b-a3b")
         oc_env = OPENCLAW_EXEC_ENV
         # OpenShell 0.1.x: no inference.local. OpenClaw calls the provider's
         # own endpoint with the placeholder key this exec receives in the
         # provider's env var (e.g. NVIDIA_API_KEY); the sandbox proxy puts in
         # the real key only for the profile's endpoints and binaries. The
         # placeholder is read inside the sandbox (\$), never by the installer.
-        base_url = provider.base_url or NATIVE_BASE_URLS.get(provider.type, "")
+        # The endpoint is workload configuration: the type's *_BASE_URL in
+        # the sandbox env (OpenShell's documented way), else the provider's.
+        endpoint = sandbox_endpoint(sb, provider)
+        base_url = endpoint or NATIVE_BASE_URLS.get(provider.type, "")
         key_var = credential_env_name(provider.type, self.provider_profiles)
         auth_choice = (OPENCLAW_AUTH_CHOICES.get(provider.type)
-                       if not (provider.base_url or provider.base_url_secret_key) else None)
+                       if not (endpoint or provider.base_url_secret_key) else None)
         if (not base_url and not auth_choice) or not key_var:
             log(f"WARN: no native endpoint known for provider type '{provider.type}'; "
                 f"set baseUrl on provider '{provider.name}'. Skipping OpenClaw onboarding")
@@ -3761,7 +3842,7 @@ class ProfileApplier:
             self.install_keepalive(ws, sb)
             return
         if any(p.enabled and p.name in sb.providers and p.type == "openai"
-               and not (p.base_url or p.base_url_secret_key) for p in ws.providers):
+               and not (sandbox_endpoint(sb, p) or p.base_url_secret_key) for p in ws.providers):
             # API-key chats use OpenClaw without the optional Codex plugin.
             self.cli(*exec_cmd, "sh", "-c",
                      f"{oc_env} openclaw config set 'agents.defaults.models.openai/*.agentRuntime' "
@@ -3807,7 +3888,8 @@ class ProfileApplier:
         refilled = (self.harness_refilled.get((ws.name, sb.name), False)
                     or self.gate_refilled.get((ws.name, sb.name), False))
         self.cli(*exec_cmd, "sh", "-c",
-                 openclaw_gateway_script(self.cfg, ws.name, sb.name, oc_env, refilled=refilled),
+                 openclaw_gateway_script(self.cfg, ws.name, sb.name, oc_env, refilled=refilled,
+                                         env_digest=env_digest(sb.env_values)),
                  check=False)
         self.install_keepalive(ws, sb)
 
@@ -3915,14 +3997,14 @@ class ProfileApplier:
             return [f"{HARNESS_MOUNT} is not mounted from volume {volume}; "
                     "the next apply recreates the sandbox"]
         expected = (Path(self.volumes.inspect(volume)["Mountpoint"]) / HARNESS_MARKER).read_bytes()
-        seen = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
+        seen = self.cli(*self.exec_args(ws, sb), "--no-tty", "--",
                         "cat", f"{HARNESS_MOUNT}/{HARNESS_MARKER}", check=False, quiet=True)
         if not seen.ok or seen.out.strip() != expected.decode("utf-8", "replace").strip():
             return [f"the sandbox does not see {source} at {HARNESS_MOUNT}"]
         info = self.harness_info.get((ws.name, sb.name))
         if info is None:
             return []
-        exec_cmd = ["sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--"]
+        exec_cmd = [*self.exec_args(ws, sb), "--no-tty", "--"]
         # `mcp list` never shows bundle servers; verify the bundle row of
         # `plugins list --json` instead (mount row loaded, caps when present,
         # native ids enabled).
@@ -4052,7 +4134,7 @@ class ProfileApplier:
                 failures.append(f"{GATE_MOUNT} is not the read-only gate volume")
             if seen.get(AUDIT_MOUNT) != ("volume", audit_volume, True):
                 failures.append(f"{AUDIT_MOUNT} is not the audit volume")
-        exec_cmd = ("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--")
+        exec_cmd = (*self.exec_args(ws, sb), "--no-tty", "--")
         policy = self.cli(*exec_cmd, "sha256sum", f"{GATE_MOUNT}/tool-actions.yaml",
                           check=False, quiet=True)
         if not policy.ok or policy.out.split()[:1] != [policy_hash.removeprefix("sha256:")]:
@@ -4120,7 +4202,7 @@ class ProfileApplier:
         self.tool_gate_identity(ws, sb)
         if not enable:
             return
-        exec_cmd = ("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--")
+        exec_cmd = (*self.exec_args(ws, sb), "--no-tty", "--")
         if not self.cli(*exec_cmd, "node", "-e", _TOOL_GATE_CONFIG,
                         check=False, quiet=True).ok:
             raise InstallerError(f"could not configure saw-tool-gate in sandbox '{sb.name}'")
@@ -4469,7 +4551,7 @@ class ProfileApplier:
                     # The agent setup steps are best effort; this is what
                     # catches an image whose OpenClaw cannot run under the
                     # sandbox policy (found live: /opt/openclaw was denied).
-                    ran = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty",
+                    ran = self.cli(*self.exec_args(ws, sb), "--no-tty",
                                    "--", "sh", "-c", "openclaw --version", check=False, quiet=True)
                     if not ran.ok:
                         detail = (ran.err or ran.out).strip().splitlines()[-1:] or [f"exit {ran.rc}"]
@@ -4544,7 +4626,14 @@ _WRITE_PASSWORD_JS = ('const fs=require("fs"),f=process.argv[1];const c=JSON.par
 _NEW_SECRET_JS = 'process.stdout.write(require("crypto").randomBytes(24).toString("hex"))'
 
 
-def openclaw_gateway_script(cfg, workspace, sandbox, oc_env, refilled=False):
+def env_digest(values):
+    """Short digest of a sandbox env (no values in the script itself)."""
+    if not values:
+        return ""
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def openclaw_gateway_script(cfg, workspace, sandbox, oc_env, refilled=False, env_digest=""):
     """The sandbox shell script that configures and (re)starts OpenClaw's
     gateway on 0.0.0.0:18789.
 
@@ -4640,6 +4729,10 @@ def openclaw_gateway_script(cfg, workspace, sandbox, oc_env, refilled=False):
         # The control UI is reached through a route, so the browser's Origin
         # is the route's https URL.
         lines.append(f"openclaw config set gateway.controlUi.allowedOrigins {q(json.dumps(origins))}")
+    # The gateway keeps the env it started with: a changed sandbox env
+    # changes the fingerprint, so the gateway restarts with the new one.
+    if env_digest:
+        lines.append(f"# sandbox env: {env_digest}")
     # Every setting above is fixed text (the secret stays "$secret"), so
     # their digest says whether the running gateway has them.
     fingerprint = hashlib.sha256("\n".join(lines).encode()).hexdigest()

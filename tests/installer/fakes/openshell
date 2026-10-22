@@ -301,6 +301,9 @@ elif op == "sandbox create":
     if missing:
         fail(f"Error: provider '{missing[0]}' not found")
     state["sandboxes"][key] = {"image": opt("--from"), "providers": providers, "phase": "Ready"}
+    envs = [head[i + 1] for i, a in enumerate(head) if a == "--env"]
+    if envs:
+        state["sandboxes"][key]["env"] = envs
     remember_labels("sandbox", ws, opt("--name"))
     if opt("--driver-config-json"):
         state["sandboxes"][key]["driverConfig"] = json.loads(opt("--driver-config-json"))

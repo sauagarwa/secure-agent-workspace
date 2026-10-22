@@ -48,9 +48,8 @@ def load(path):
 
 def secret_fields(provider):
     """The fields a provider reads from its Secret, as the installer does
-    (resolve_credentials): the credential(s), optionally a base URL and a
-    model, and every generic `config:` entry read from the Secret
-    (`secretKey`), so the RHDH form asks for each of them."""
+    (resolve_credentials): the credential(s), and optionally a base URL and
+    a model (the older provider-level fields)."""
     creds = provider.get("credentials")
     if isinstance(creds, list) and creds:
         fields = []
@@ -64,14 +63,6 @@ def secret_fields(provider):
     if provider.get("baseUrlSecretKey"):
         fields.append({"key": provider["baseUrlSecretKey"], "kind": "url", "required": True,
                        "title": "Endpoint base URL (OpenAI-compatible, ending in /v1)"})
-    for ckey, src in (provider.get("config") or {}).items():
-        if not isinstance(src, dict) or not src.get("secretKey"):
-            continue            # literals are fixed in the profile, not asked for
-        if any(f["key"] == src["secretKey"] for f in fields):
-            continue
-        fields.append({"key": src["secretKey"],
-                       "kind": "url" if "URL" in ckey.upper() else "text",
-                       "required": True, "title": src.get("title") or ckey})
     if provider.get("modelSecretKey"):
         field = {"key": provider["modelSecretKey"], "kind": "text", "required": True,
                  "title": "Model"}
@@ -79,6 +70,21 @@ def secret_fields(provider):
             field["default"] = provider["model"]
         fields.append(field)
     return fields
+
+
+def sandbox_env_fields(sandbox):
+    """(secret, field) for each `env:` entry of a sandbox read from a Secret,
+    as the installer does (resolve_sandbox_env), so the RHDH form asks for
+    it: its `title` is the label, its `default` pre-fills the form. Literal
+    `value` entries are fixed by the profile and not asked for."""
+    for name, src in (sandbox.get("env") or {}).items():
+        if not isinstance(src, dict) or not src.get("secretKey") or not src.get("secret"):
+            continue
+        field = {"key": src["secretKey"], "kind": "url" if "URL" in str(name).upper() else "text",
+                 "required": True, "title": src.get("title") or str(name)}
+        if src.get("default") not in (None, ""):
+            field["default"] = str(src["default"])
+        yield src["secret"], field
 
 
 def catalog():
@@ -112,6 +118,14 @@ def catalog():
                                            {"providers": [], "fields": []})
                 entry["providers"] = sorted(set(entry["providers"]) | {prov.get("type", "")})
                 for f in secret_fields(prov):
+                    if f["key"] not in {x["key"] for x in entry["fields"]}:
+                        entry["fields"].append(f)
+            # The workload settings a sandbox reads from a Secret.
+            for sb in (load(wdir / "sandbox.yaml").get("spec") or {}).get("sandboxes") or []:
+                if not sb.get("enabled", True):
+                    continue
+                for secret, f in sandbox_env_fields(sb):
+                    entry = secrets.setdefault(secret, {"providers": [], "fields": []})
                     if f["key"] not in {x["key"] for x in entry["fields"]}:
                         entry["fields"].append(f)
         for entry in secrets.values():

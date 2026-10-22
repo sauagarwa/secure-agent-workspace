@@ -264,8 +264,8 @@ controller runs with a global `--policy`; the default allows it.)
   workspaces and sandboxes (with their UI flag), and each Secret its providers
   read with the fields it needs: the credential (`credentialSecretKey`, or each
   entry of a `credentials:` array), `baseUrlSecretKey` / `modelSecretKey` when
-  set, and every `config:` entry read from the Secret (`secretKey`, labelled
-  by its `title`);
+  set, and every sandbox `env:` entry read from a Secret (`secret` +
+  `secretKey`, labelled by its `title`, pre-filled with its `default`);
 - `charts/openshell-rhdh/files/create-workspace.yaml`: the RHDH template. It
   lists the profiles, and for the chosen one asks only for its fields. API
   keys use RHDH's Secret field, so they are not stored with the task.

@@ -4,9 +4,10 @@ A SAW can use a model server of your own instead of a cloud provider.
 OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 `https://inference.local`), so the agent calls the endpoint itself:
 
-- The installer creates an `openai` provider with the endpoint's base URL
-  (`--config OPENAI_BASE_URL=<url>`) and the key (passed via the
-  environment), and attaches it to the sandbox.
+- The installer creates an `openai` provider with the key (passed via the
+  environment) and attaches it to the sandbox. The endpoint and the model
+  are the workload's settings: `OPENAI_BASE_URL` and `MODEL` in the sandbox's
+  `env:`, passed as `sandbox create --env` (as OpenShell documents).
 - OpenClaw is onboarded against the endpoint's own URL, with the placeholder
   key the sandbox holds in `OPENAI_API_KEY`. The sandbox proxy replaces the
   placeholder with the real key only on requests to an endpoint of the
@@ -45,12 +46,11 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 
 3. Restart the VM (`make saw-restart`) so the installer applies it.
 
-> The `custom-inference` profile reads the endpoint through the generic provider
-> `config:` map — `OPENAI_BASE_URL: {secretKey: url}` — and the model through
-> `modelSecretKey: model`. A base URL given this way is validated like any base
-> URL and points OpenClaw at the endpoint. The RHDH form still asks for the URL
-> (its label comes from the entry's `title`). See
-> [Provider configuration](versioned-bom-installer.md#provider-configuration).
+> The `custom-inference` profile's `notebook` sandbox reads `OPENAI_BASE_URL`
+> (`url`) and `MODEL` (`model`) from the `inference` Secret through its `env:`.
+> The URL is validated as a base URL and OpenClaw is onboarded against it; the
+> RHDH form asks for both. See
+> [Providers and sandbox environment](versioned-bom-installer.md#providers-and-sandbox-environment).
 
 ## Requirements
 
@@ -70,8 +70,9 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
   governance on, the gateway uses only the governance catalog: set the
   `host`/`port` of the endpoint in `charts/governance-policy/profiles/openai.yaml`
   to your server's (keep `binaries`: OpenClaw runs under `node`). The
-  provider's `OPENAI_BASE_URL` alone is not enough: OpenShell never sends
-  the key to a host the profile does not name.
+  sandbox's `OPENAI_BASE_URL` alone is not enough: OpenShell never sends
+  the key to a host the profile does not name (OpenShell recommends a
+  custom profile for an alternate host rather than reusing `openai`).
 - `inferenceTimeout` is still accepted but no longer used: there is no
   gateway router to time out.
 

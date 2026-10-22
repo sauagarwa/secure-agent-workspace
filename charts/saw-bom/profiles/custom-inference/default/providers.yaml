@@ -4,21 +4,15 @@ metadata:
   profile: custom-inference
 spec:
   providers:
-    # OpenShell's `openai` provider type reaches any OpenAI-compatible server.
-    # The endpoint comes in through the generic `config:` map: OPENAI_BASE_URL
-    # is read from the `inference` Secret's `url` key, passed to `provider
-    # create --config`, and points OpenClaw at that endpoint. The model comes
-    # from the Secret's `model` key. The sandbox only ever sees a placeholder
-    # key; the proxy adds the real one for the profile's endpoints.
+    # OpenShell's `openai` provider type for an OpenAI-compatible server. A
+    # provider only holds the credential: the sandbox gets a placeholder key
+    # and the proxy adds the real one for the profile's endpoints. The
+    # endpoint and the model are workload settings, in the sandbox's `env:`
+    # (sandbox.yaml), as OpenShell documents.
     - name: custom
       type: openai
       credentialSecret: inference
       credentialSecretKey: api_key
-      modelSecretKey: model
-      config:
-        OPENAI_BASE_URL:
-          secretKey: url
-          title: Endpoint base URL (OpenAI-compatible, ending in /v1)
       # Self-hosted models can take longer than OpenShell's 60 s default.
       inferenceTimeout: 300
     - name: brave
