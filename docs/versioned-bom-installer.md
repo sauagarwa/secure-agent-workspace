@@ -508,9 +508,47 @@ installer change:
 - `config:` is for **non-secret** provider configuration (base URLs, model
   names, org/project ids, ...). API keys stay on the credential path
   (`credentialSecret`/`credentialSecretKey`), which passes the value through an
-  environment variable, never argv. `baseUrl` and `model` keep their dedicated
-  fields because the installer makes onboarding decisions from them (which
-  auth-choice, which model the agent runs).
+  environment variable, never argv.
+- The provider type's base-URL key (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`,
+  `NVIDIA_BASE_URL`) is the provider's **endpoint**, exactly like
+  `baseUrlSecretKey`: it is validated as a base URL (http(s), no localhost, no
+  embedded credentials) and OpenClaw is onboarded against it
+  (`custom-api-key`) instead of the native API. A base-URL key that belongs to
+  another type is rejected.
+- An entry may carry a `title`, used as the label of the field the RHDH
+  "create workspace" form asks for. Every `secretKey` entry becomes a form
+  field (`url` kind when the key contains `URL`, text otherwise); literal
+  `value` entries are fixed in the profile and not asked for.
+
+### Model from the Secret
+
+`model` is the default; `modelSecretKey` reads the model from the provider's
+Secret and overrides it. The `data-science` profile's `nvidia` providers use
+`modelSecretKey: model`, so the `inference` Secret's `model` (and the Model
+field of the RHDH form, which defaults to the profile's model) decides which
+model the sandboxes run.
+
+### Credentials array
+
+A provider normally has one credential (`credentialSecretKey`). A type whose
+profile declares several credentials can list them instead (not both):
+
+```yaml
+- name: tk
+  type: twokey
+  credentialSecret: twokey
+  credentials:
+    - secretKey: api_key          # primary: the profile's credentials[0]
+    - secretKey: app_secret       # credentials[1]
+      env: TWOKEY_APP_SECRET       # optional; defaults to the profile's env var
+      title: App secret            # optional RHDH form label
+```
+
+All values come from the same Secret. The first entry is the primary
+credential; each further entry is passed as its own `--credential ENV`, `ENV`
+being the entry's `env` or the first `env_vars` of the profile's credential at
+the same position. Values never appear in argv or logs. Every entry is a
+(secret) field of the RHDH form.
 
 ### Credential environment variable
 
@@ -524,6 +562,11 @@ chart. A profile lists `env_vars` as a list so the gateway can expose the same
 credential under several names inside the sandbox (for example `GITHUB_TOKEN`
 and `GH_TOKEN`); the installer passes the value through the first, and the
 gateway exposes all of them.
+
+A sandbox gets these variables only through the providers it lists in
+`sandbox.yaml` (`providers:`), each holding a placeholder that the egress proxy
+swaps for the real value on requests to the profile's endpoints. There is no
+sandbox-level `env:` in the BOM: credentials must stay on the provider path.
 
 ## Moving to a new OpenShell release series (0.0.x -> 0.1.x)
 

@@ -43,12 +43,30 @@ def load(path):
 
 def secret_fields(provider):
     """The fields a provider reads from its Secret, as the installer does
-    (resolve_credentials): the key, and optionally a base URL and a model."""
-    fields = [{"key": provider.get("credentialSecretKey", "api_key"), "kind": "secret",
-               "required": True, "title": "API key"}]
+    (resolve_credentials): the credential(s), optionally a base URL and a
+    model, and every generic `config:` entry read from the Secret
+    (`secretKey`), so the RHDH form asks for each of them."""
+    creds = provider.get("credentials")
+    if isinstance(creds, list) and creds:
+        fields = []
+        for i, entry in enumerate(creds):
+            fields.append({"key": entry["secretKey"], "kind": "secret", "required": True,
+                           "title": entry.get("title") or ("API key" if i == 0 else
+                                                          f"Credential ({entry['secretKey']})")})
+    else:
+        fields = [{"key": provider.get("credentialSecretKey", "api_key"), "kind": "secret",
+                   "required": True, "title": "API key"}]
     if provider.get("baseUrlSecretKey"):
         fields.append({"key": provider["baseUrlSecretKey"], "kind": "url", "required": True,
                        "title": "Endpoint base URL (OpenAI-compatible, ending in /v1)"})
+    for ckey, src in (provider.get("config") or {}).items():
+        if not isinstance(src, dict) or not src.get("secretKey"):
+            continue            # literals are fixed in the profile, not asked for
+        if any(f["key"] == src["secretKey"] for f in fields):
+            continue
+        fields.append({"key": src["secretKey"],
+                       "kind": "url" if "URL" in ckey.upper() else "text",
+                       "required": True, "title": src.get("title") or ckey})
     if provider.get("modelSecretKey"):
         field = {"key": provider["modelSecretKey"], "kind": "text", "required": True,
                  "title": "Model"}

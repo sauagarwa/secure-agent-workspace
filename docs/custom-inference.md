@@ -45,10 +45,11 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 
 3. Restart the VM (`make saw-restart`) so the installer applies it.
 
-> The `custom-inference` profile uses the dedicated `baseUrlSecretKey`/
-> `modelSecretKey` fields. The same endpoint config can also be supplied through
-> the generic provider `config:` map (`OPENAI_BASE_URL`), and any profile-backed
-> provider type works without an installer change; see
+> The `custom-inference` profile reads the endpoint through the generic provider
+> `config:` map — `OPENAI_BASE_URL: {secretKey: url}` — and the model through
+> `modelSecretKey: model`. A base URL given this way is validated like any base
+> URL and points OpenClaw at the endpoint. The RHDH form still asks for the URL
+> (its label comes from the entry's `title`). See
 > [Provider configuration](versioned-bom-installer.md#provider-configuration).
 
 ## Requirements

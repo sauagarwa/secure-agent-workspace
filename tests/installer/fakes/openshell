@@ -40,16 +40,23 @@ def fail(message, code=1):
     sys.exit(code)
 
 
-def credential():
-    """Like the real CLI: `--credential NAME` reads $NAME, `NAME=value` is literal."""
-    spec = opt("--credential")
-    if spec is None:
-        return None
+def _resolve_credential(spec):
     if "=" in spec:
         return spec
     if spec not in os.environ:
         fail(f"Error: environment variable {spec} is not set")
     return f"{spec}={os.environ[spec]}"
+
+
+def credential():
+    """Like the real CLI: `--credential NAME` reads $NAME, `NAME=value` is literal."""
+    spec = opt("--credential")
+    return None if spec is None else _resolve_credential(spec)
+
+
+def all_credentials():
+    """Every `--credential` given (a provider may carry several)."""
+    return [_resolve_credential(args[i + 1]) for i, a in enumerate(args) if a == "--credential"]
 
 
 if "--" in args:
@@ -195,6 +202,8 @@ elif op == "provider create":
     if key in state["providers"]:
         fail(f"Error: provider {opt('--name')} already exists")
     state["providers"][key] = {"type": opt("--type"), "credential": credential()}
+    if len(all_credentials()) > 1:
+        state["providers"][key]["credentials"] = all_credentials()
     configs = [head[i + 1] for i, a in enumerate(head) if a == "--config"]
     if configs:
         state["providers"][key]["config"] = configs
@@ -203,6 +212,8 @@ elif op == "provider update":
     if key not in state["providers"]:
         fail("Error: provider not found")
     state["providers"][key]["credential"] = credential()
+    if len(all_credentials()) > 1:
+        state["providers"][key]["credentials"] = all_credentials()
     configs = [head[i + 1] for i, a in enumerate(head) if a == "--config"]
     if configs:
         state["providers"][key]["config"] = configs

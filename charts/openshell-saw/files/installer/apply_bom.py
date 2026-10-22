@@ -120,15 +120,24 @@ PROVIDER_CRED_MAP = {
 }
 
 
-def profile_credential_env(profile_text):
-    """The primary credential env var a provider profile declares
-    (credentials[0].env_vars[0]), or "" when it declares none."""
+def profile_credential_envs(profile_text):
+    """The first env var of each credential a provider profile declares, in
+    order (credentials[i].env_vars[0]); "" for a credential without one."""
     try:
         doc = yaml.safe_load(profile_text) if profile_text else None
     except yaml.YAMLError:
-        return ""
-    creds = (doc or {}).get("credentials") or []
-    envs = (creds[0].get("env_vars") or []) if creds else []
+        return []
+    out = []
+    for cred in (doc or {}).get("credentials") or []:
+        envs = (cred.get("env_vars") or []) if isinstance(cred, dict) else []
+        out.append(envs[0] if envs else "")
+    return out
+
+
+def profile_credential_env(profile_text):
+    """The primary credential env var a provider profile declares
+    (credentials[0].env_vars[0]), or "" when it declares none."""
+    envs = profile_credential_envs(profile_text)
     return envs[0] if envs else ""
 
 
@@ -581,6 +590,12 @@ class Provider:
     # provider's Secret). Adding a new knob needs no installer change.
     config: dict = field(default_factory=dict)
     config_values: dict = field(default_factory=dict)
+    # Optional `credentials:` array. The first entry is the primary credential
+    # (same as credentialSecretKey); the rest are extra values from the same
+    # Secret, each passed as its own `--credential ENV`, ENV taken from the
+    # entry's `env` or the profile's credentials[i].env_vars[0].
+    credentials_spec: list = field(default_factory=list)
+    extra_credential_values: list = field(default_factory=list)   # [(spec, value)]
 
 
 @dataclass
@@ -1302,18 +1317,26 @@ def parse_profiles(files):
                 for p in (_yaml(text, key).get("spec") or {}).get("providers") or []:
                     if "name" not in p or "type" not in p:
                         raise InstallerError(f"{key}: every provider needs name and type")
+                    cred_spec = p.get("credentials")
+                    if cred_spec is not None and "credentialSecretKey" in p:
+                        raise InstallerError(f"{key}: provider '{p['name']}' sets both "
+                                             "credentials and credentialSecretKey; use one")
+                    primary_key = p.get("credentialSecretKey", "api_key")
+                    if isinstance(cred_spec, list) and cred_spec and isinstance(cred_spec[0], dict):
+                        primary_key = str(cred_spec[0].get("secretKey", ""))
                     ws.providers.append(Provider(
                         name=p["name"], type=p["type"],
                         enabled=p.get("enabled", True),
                         credential_free=p.get("credentialFree", False),
                         nemoclaw_provider=p.get("nemoclawProvider", ""),
                         credential_secret=p.get("credentialSecret", ""),
-                        credential_secret_key=p.get("credentialSecretKey", "api_key"),
+                        credential_secret_key=primary_key,
                         model=p.get("model", ""),
                         base_url_secret_key=p.get("baseUrlSecretKey", ""),
                         model_secret_key=p.get("modelSecretKey", ""),
                         inference_timeout=int(p.get("inferenceTimeout", 0) or 0),
-                        config=p.get("config") or {}))
+                        config=p.get("config") or {},
+                        credentials_spec=cred_spec if cred_spec is not None else []))
             if "sandbox.yaml" in docs:
                 key, text = docs["sandbox.yaml"]
                 for s in (_yaml(text, key).get("spec") or {}).get("sandboxes") or []:
@@ -1492,6 +1515,11 @@ def validate_profiles(profiles, known_profiles=()):
                               "KEY to {value|secretKey}")
             else:
                 for ckey, src in p.config.items():
+                    if (ckey in BASE_URL_CONFIG_KEYS.values()
+                            and BASE_URL_CONFIG_KEYS.get(p.type) != ckey):
+                        errors.append(f"{where}: provider '{p.name}' of type '{p.type}' does not "
+                                      f"take a base URL ({ckey}; supported: "
+                                      f"{', '.join(sorted(BASE_URL_CONFIG_KEYS))})")
                     if not CONFIG_KEY_RE.match(str(ckey)):
                         errors.append(f"{where}: provider '{p.name}' has an invalid config key "
                                       f"'{ckey}'")
@@ -1511,6 +1539,28 @@ def validate_profiles(profiles, known_profiles=()):
                             check_config_value(str(src["value"]))
                         except ValueError as exc:
                             errors.append(f"{where}: provider '{p.name}' config '{ckey}': {exc}")
+            if p.credentials_spec:
+                if not isinstance(p.credentials_spec, list):
+                    errors.append(f"{where}: provider '{p.name}' credentials must be a list of "
+                                  "{secretKey[, env]}")
+                elif p.credential_free:
+                    errors.append(f"{where}: keyless provider '{p.name}' cannot have credentials")
+                else:
+                    envs = set()
+                    for i, entry in enumerate(p.credentials_spec):
+                        if not isinstance(entry, dict) or not SECRET_KEY_RE.match(
+                                str(entry.get("secretKey", ""))):
+                            errors.append(f"{where}: provider '{p.name}' credentials[{i}] needs a "
+                                          "valid secretKey")
+                            continue
+                        env = entry.get("env")
+                        if env is not None and not ENV_NAME_RE.match(str(env)):
+                            errors.append(f"{where}: provider '{p.name}' credentials[{i}] has an "
+                                          f"invalid env '{env}'")
+                        if env and env in envs:
+                            errors.append(f"{where}: provider '{p.name}' credentials use env "
+                                          f"'{env}' twice")
+                        envs.add(env)
         sandbox_names = set()
         for s in ws.sandboxes:
             if not s.enabled:
@@ -1576,13 +1626,23 @@ def resolve_credentials(profiles, secrets_dir):
             # literals); secretKey needs a credentialSecret (validated).
             if p.config:
                 cfg_base = secrets_dir / p.credential_secret if p.credential_secret else None
+                bkey = BASE_URL_CONFIG_KEYS.get(p.type)
                 for ckey, src in p.config.items():
                     raw = src["value"] if "value" in src else read_secret_value(cfg_base, src["secretKey"])
                     try:
-                        p.config_values[ckey] = check_config_value(str(raw))
+                        if ckey == bkey:
+                            # The provider's endpoint, exactly like
+                            # baseUrlSecretKey: validated as a base URL, and
+                            # onboarding points the agent at it (custom-api-key).
+                            p.config_values[ckey] = check_base_url(str(raw))
+                        else:
+                            p.config_values[ckey] = check_config_value(str(raw))
                     except ValueError as exc:
-                        raise InstallerError(f"provider '{p.name}' in workspace '{ws.name}' "
-                                             f"config '{ckey}': {exc}") from None
+                        raise InstallerError(f"provider '{p.name}' in workspace '{ws.name}': {exc} "
+                                             f"(config '{ckey}')") from None
+                if (bkey and bkey in p.config_values
+                        and not p.base_url and not p.base_url_secret_key):
+                    p.base_url = p.config_values[bkey]
             if p.credential_free:
                 continue
             base = secrets_dir / p.credential_secret
@@ -1610,6 +1670,15 @@ def resolve_credentials(profiles, secrets_dir):
                         raise InstallerError(f"provider '{p.name}' in workspace '{ws.name}': {exc} "
                                              f"(Secret '{p.credential_secret}' key "
                                              f"'{p.base_url_secret_key}')") from None
+            # Extra credentials (credentials[1:]) from the same Secret.
+            p.extra_credential_values = []
+            for i, entry in enumerate(p.credentials_spec[1:], start=1):
+                extra = read_secret_value(base, entry["secretKey"])
+                if not extra:
+                    raise InstallerError(
+                        f"credential #{i + 1} for provider '{p.name}' in workspace '{ws.name}' "
+                        f"not found: Secret '{p.credential_secret}' key '{entry['secretKey']}'")
+                p.extra_credential_values.append((entry, extra))
             creds.setdefault(ws.name, {})[p.name] = value
     return creds
 
@@ -1627,6 +1696,8 @@ SHELL_UNSAFE = set("\"'`$\\;|&<>(){}")
 
 # Generic provider config keys: letters, digits, dot, dash, underscore.
 CONFIG_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# Environment variable names (a credential's `env`).
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def check_config_value(value):
@@ -2906,11 +2977,28 @@ class ProfileApplier:
         (/proc/<pid>/cmdline) or in logs."""
         env, credential_args = {}, ()
         env_name = credential_env_name(provider.type, self.provider_profiles)
+        if provider.credentials_spec and provider.credentials_spec[0].get("env"):
+            env_name = provider.credentials_spec[0]["env"]
         if provider.credential_free:
             self.check_keyless_profile(ws, provider)
         else:
             env = {env_name: self.creds[ws.name][provider.name]}
             credential_args = ("--credential", env_name)
+            # Extra credentials: one `--credential ENV` each, ENV from the
+            # entry or from the profile's credential at the same position.
+            profile_envs = profile_credential_envs(self.provider_profiles.get(provider.type, ""))
+            for i, (entry, value) in enumerate(provider.extra_credential_values, start=1):
+                extra_env = entry.get("env") or (profile_envs[i] if i < len(profile_envs) else "")
+                if not extra_env:
+                    raise InstallerError(
+                        f"provider '{provider.name}': credentials[{i}] has no env var; set its "
+                        f"env, or ship a '{provider.type}' profile that declares credentials[{i}]")
+                if extra_env in env:
+                    raise InstallerError(f"provider '{provider.name}': credentials[{i}] env "
+                                         f"'{extra_env}' is already used")
+                self.sh.add_secret(value)
+                env[extra_env] = value
+                credential_args += ("--credential", extra_env)
         # A custom endpoint is recorded on the provider; start_openclaw points
         # the agent at it. Generic `config:` entries are passed through too, and
         # may override the base-URL key.
@@ -2959,7 +3047,7 @@ class ProfileApplier:
                                      "or their absence cannot be verified; remove them explicitly first")
         if created.existed and not provider.credential_free:
             updated = self.cli("provider", "update", provider.name, *ws_args(ws.name),
-                               "--credential", env_name, *config, env=env, check=False)
+                               *credential_args, *config, env=env, check=False)
             if not updated.ok:
                 log(f"WARN: could not refresh the credential of existing provider '{provider.name}'")
         self.remember("provider", ws.name, provider.name)
