@@ -1,8 +1,8 @@
 """A custom OpenAI-compatible endpoint (vLLM, Ollama, ...) on OpenShell 0.1.x:
 an `openai` provider holds only the key; the endpoint and the model are the
-workload's settings, OPENAI_BASE_URL and MODEL in the sandbox's env
-(`sandbox create --env`), and OpenClaw is onboarded against that endpoint
-itself (no inference routes, no https://inference.local)."""
+sandbox's `inference:` settings (protocol openai, baseUrl and model from the
+Secret), and OpenClaw is onboarded against that endpoint itself (no
+inference routes, no https://inference.local)."""
 
 import shlex
 import pytest
@@ -40,7 +40,8 @@ def test_profile_is_valid_and_reads_url_and_model_from_the_secret(ab, profiles, 
     assert creds["default"]["custom"] == "sk-CUSTOM-TEST-KEY"
     # ...the endpoint and model are the sandbox's (the URL normalised).
     sb = notebook(profiles)
-    assert sb.env_values == {"OPENAI_BASE_URL": URL, "MODEL": MODEL}
+    assert sb.inference_values == {"providerRef": "custom", "protocol": "openai",
+                                   "baseUrl": URL, "model": MODEL, "timeoutSeconds": 300}
     assert (ab.sandbox_endpoint(sb, custom), ab.sandbox_model(sb, custom)) == (URL, MODEL)
 
 
@@ -52,8 +53,7 @@ def test_apply_creates_an_openai_provider_and_onboards_on_its_endpoint(
     # No provider --config (not part of OpenShell 0.1.2's provider CLI).
     assert state["providers"]["default/custom"] == {
         "type": "openai", "credential": "OPENAI_API_KEY=sk-CUSTOM-TEST-KEY"}
-    assert state["sandboxes"]["default/notebook"]["env"] == [
-        f"MODEL={MODEL}", f"OPENAI_BASE_URL={URL}"]
+    assert "env" not in state["sandboxes"]["default/notebook"]     # inference is not env
     assert not [c for c in fake_env.openshell_calls() if c[:1] == ["inference"]]
     # The key only ever travels in the environment.
     assert not any("sk-CUSTOM-TEST-KEY" in " ".join(c) for c in fake_env.openshell_calls())
@@ -72,10 +72,10 @@ def test_rerun_updates_the_base_url(ab, fake_env, config, profiles, custom_secre
     before = len(fake_env.openshell_calls())
     ab.ProfileApplier(ab.Shell(), config, creds).apply(profiles2)
     calls = fake_env.openshell_calls()[before:]
-    # The sandbox exists already, so the new value reaches the agent through
-    # `sandbox exec --env` and its onboarding.
-    execs = [c for c in calls if c[:2] == ["sandbox", "exec"]]
-    assert execs and all("OPENAI_BASE_URL=http://ollama.models.svc:11434/v1" in c for c in execs)
+    # The sandbox exists already: the agent is onboarded again on the new
+    # endpoint (inference is agent configuration, not the sandbox's env, so
+    # no recreation is needed).
+    assert "sandbox delete" not in [" ".join(c[:2]) for c in calls]
     onboard = next(" ".join(c) for c in calls if "openclaw onboard " in " ".join(c))
     assert "--custom-base-url http://ollama.models.svc:11434/v1 " in onboard
 

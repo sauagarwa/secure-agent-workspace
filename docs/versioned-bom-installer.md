@@ -481,100 +481,125 @@ provider with `OPENAI_BASE_URL`, and OpenClaw calls that endpoint directly
 profile and put `provider: openai`, `model`, `url` and `api_key` in the
 `inference` Secret; see [Custom inference](custom-inference.md).
 
-## Providers and sandbox environment
+## Providers, inference and sandbox environment
 
-OpenShell splits the two concerns, and the BOM follows it
+OpenShell splits the concerns, and the BOM follows it
 ([providers](https://docs.nvidia.com/openshell/v0.1.2/how-it-works/providers/overview),
 [inference](https://docs.nvidia.com/openshell/v0.1.2/how-it-works/inference),
 [sandboxes](https://docs.nvidia.com/openshell/v0.1.2/how-it-works/sandboxes/overview)):
 
-- a **provider** (`providers.yaml`) holds credentials. The sandbox gets a
-  placeholder; the proxy puts in the real value only for the profile's
-  endpoints. *"Provider attachment does not select or rewrite a model."*
-- the **workload** owns its endpoint, model and other settings: a
-  sandbox's `env:` (`sandbox.yaml`), passed as `sandbox create --env`.
+| Concept | Where | Owns |
+|---|---|---|
+| provider profile | `charts/governance-policy/profiles/<type>.yaml` | the hosts a credential may reach, the credential names and the env vars they surface as |
+| provider | `providers.yaml` | which profile (`type`) and which Secret keys hold its credentials |
+| inference | `sandbox.yaml` `inference:` | how the agent reaches its model: provider, protocol, endpoint, model, timeout |
+| sandbox | `sandbox.yaml` | image, type, harness, attached providers, ordinary environment |
 
-### Sandbox `env:`
+*"Provider attachment does not select or rewrite a model"*: the sandbox gets
+a placeholder credential, the proxy puts in the real value for the profile's
+endpoints, and the agent's own configuration says which endpoint and model.
+
+### Inputs
+
+Wherever a value may come from a Secret, it is written the Kubernetes way:
+
+```yaml
+model:
+  secretKeyRef: {name: inference, key: model}   # /run/saw/secrets/inference/model
+  default: meta-llama/Llama-3.1-8B-Instruct     # used when the key is absent
+  required: false                               # default: required when no default
+  title: Model (notebook)                       # the RHDH form's label
+```
+
+A literal (`model: llama-3.1-8b`) is fixed by the profile. The RHDH "create
+workspace" form asks for every `secretKeyRef` input: `title` is its label,
+`default` pre-fills it, and it is required exactly when the installer would
+refuse an absent value, so the form and the installer never disagree (an
+empty `default: ""` makes a field optional). The Secret must be mounted on
+the VM: `inference.secretName` or `additionalProviderSecrets` in the
+openshell-saw values, which `saw-users` sets from the catalog.
+
+### `inference:` on a sandbox
 
 ```yaml
 sandboxes:
   - name: notebook
     type: openclaw
-    providers: [custom]
-    env:
-      OPENAI_BASE_URL:            # from a Secret, asked for in the RHDH form
-        secret: inference
-        secretKey: url
-        title: Endpoint base URL (OpenAI-compatible, ending in /v1)
-      MODEL:
-        secret: inference
-        secretKey: model
-        default: meta-llama/Llama-3.1-8B-Instruct   # pre-fills the form; used if the Secret has no value
-      HF_HUB_OFFLINE: { value: "1" }                 # literal, fixed by the profile
+    providers: [internal-llm, github]
+    inference:
+      providerRef: internal-llm       # the provider whose credential the agent uses
+      protocol: openai                # openai | anthropic: how the agent talks
+      baseUrl:                        # optional; the endpoint
+        secretKeyRef: {name: inference, key: url}
+      model:
+        secretKeyRef: {name: inference, key: model}
+      timeoutSeconds: "300"           # optional
 ```
 
-- An entry is a literal `value`, or `secret` + `secretKey` read from
-  `/run/saw/secrets/<secret>/<key>` (the Secret must be mounted: it is
-  `inference.secretName` or listed in `additionalProviderSecrets`, which
-  `saw-users` does for the Secrets the catalog names), with an optional
-  `default` and `title`.
-- Every value goes into `sandbox create --env`, and into each `sandbox exec`
-  the installer runs (`--env`), so an agent in a sandbox created before a
-  change still gets the current values. A changed env changes the OpenClaw
-  gateway's fingerprint, so the gateway restarts with it.
-- Names follow OpenShell's rule (`[A-Za-z_][A-Za-z0-9_]*`, `OPENSHELL_*`
-  reserved), values are one line of at most 8 KiB.
+- `providerRef` names one of the sandbox's own providers; the installer never
+  guesses the inference provider from the attachment order or a
+  provider-level model.
+- `protocol` is how the agent speaks, independent of the provider's profile.
+  A governed profile for another host (`vllm-prod`, say) works with
+  `protocol: openai`; the profile decides which hosts the key may reach.
+- Without `baseUrl`, the agent uses the provider type's own API (NVIDIA's
+  for `nvidia`), else the protocol's official one (`api.openai.com`,
+  `api.anthropic.com`). An official API (`openai`, `anthropic` providers) is
+  onboarded natively in OpenClaw; any other endpoint as a custom one. A
+  `baseUrl` is validated (http(s), no localhost, no credentials, query or
+  fragment) and never echoed.
+- NemoClaw sandboxes get the model as `NEMOCLAW_MODEL`.
+- Without an `inference:` block the older fields apply: the sandbox `model`,
+  the provider's `model`/`modelSecretKey`/`baseUrlSecretKey`.
+
+### `env:` on a sandbox
+
+```yaml
+    env:
+      HF_HUB_OFFLINE: {value: "1"}                                 # literal
+      PROJECT: {secretKeyRef: {name: inference, key: project}, default: ""}
+```
+
+The sandbox's ordinary environment, passed as `sandbox create --env` so every
+process in the sandbox has it. Names follow OpenShell's rule
+(`[A-Za-z_][A-Za-z0-9_]*`, `OPENSHELL_*` reserved); values are one line of
+at most 8 KiB.
+
 - **Not for credentials.** The agent can read sandbox env. A name that is a
-  provider credential variable (`NVIDIA_API_KEY`, ...) or any `env_vars` name
-  of an attached provider's profile (`GITHUB_TOKEN`, `GH_TOKEN`, ...) is
-  rejected.
-- Values are plain `--env` arguments of the `openshell` CLI on the VM; keep
-  them non-secret.
-- The RHDH "create workspace" form asks for every `secret` entry (a `url`
-  field when the name contains `URL`, `title` as the label, `default`
-  pre-filled); literals are not asked for.
+  provider credential variable, or any `env_vars` name of an attached
+  provider's profile (`GITHUB_TOKEN`, `GH_TOKEN`, ...), is refused -- for
+  an existing sandbox too (the check runs before anything on the gateway
+  changes). Inference settings (`*_BASE_URL`, `MODEL`) belong in
+  `inference:`.
+- **Changing the env recreates the sandbox.** OpenShell fixes a sandbox's
+  environment at `sandbox create` (no update; `exec --env` is per command),
+  so the installer keeps the env's digest in the sandbox's
+  `saw.redhat.com/env` label and, when the profile's env differs
+  (a changed, added or removed variable), archives `/sandbox` (minus the
+  installer's own mounts), deletes the sandbox, creates it again with the
+  new env and restores the files. Open sessions end; files outside
+  `/sandbox` are not kept. Inference changes need no recreation: the agent
+  is onboarded again.
 
-### Endpoint and model of the agents the installer sets up
-
-The installer onboards OpenClaw (and starts NemoClaw) itself, so it reads
-two settings from the sandbox env:
-
-- **endpoint**: the provider type's base-URL variable (`OPENAI_BASE_URL`,
-  `ANTHROPIC_BASE_URL`, `NVIDIA_BASE_URL`). When set, it is validated as a
-  base URL (http(s), no localhost, no credentials, query or fragment) and
-  OpenClaw is onboarded against it (`custom-api-key`); otherwise the native
-  API of an official provider is used. The older provider-level
-  `baseUrlSecretKey` is still accepted.
-- **model**: the agent's own variable first (`OPENCLAW_MODEL` in an
-  `openclaw` sandbox, `NEMOCLAW_MODEL` in a `nemoclaw` one), then `MODEL`,
-  then the sandbox `model`, the provider's `model` / `modelSecretKey`, and
-  the built-in default.
-
-The shipped `custom-inference` profile takes `OPENAI_BASE_URL` and `MODEL`
-from the `inference` Secret; `data-science` takes `MODEL` from it, defaulting
-to the profile's model.
-
-### Credentials array
+### Credentials by name
 
 A provider normally has one credential (`credentialSecretKey`). A type whose
-profile declares several credentials can list them instead (not both):
+profile declares several lists them by the profile's credential name:
 
 ```yaml
 - name: tk
   type: twokey
   credentialSecret: twokey
   credentials:
-    - secretKey: api_key          # primary: the profile's credentials[0]
-    - secretKey: app_secret       # credentials[1]
-      env: TWOKEY_APP_SECRET       # optional; defaults to the profile's env var
-      title: App secret            # optional RHDH form label
+    api_key:    {secretKey: key}                   # the profile's credentials[].name
+    app_secret: {secretKey: secret, title: App secret}
 ```
 
-All values come from the same Secret. The first entry is the primary
-credential; each further entry is passed as its own `--credential ENV`, `ENV`
-being the entry's `env` or the first `env_vars` of the profile's credential at
-the same position. Values never appear in argv or logs. Every entry is a
-(secret) field of the RHDH form.
+Each is read from the same Secret and passed as its own `--credential ENV`,
+`ENV` being the env var that credential declares in the profile. Names are
+checked against the profile before anything changes; reordering a profile's
+credentials cannot change which Secret key is used. Values never appear in
+argv or logs. Every credential is a (secret) field of the RHDH form.
 
 ### Credential environment variable
 

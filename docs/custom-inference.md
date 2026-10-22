@@ -6,8 +6,8 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 
 - The installer creates an `openai` provider with the key (passed via the
   environment) and attaches it to the sandbox. The endpoint and the model
-  are the workload's settings: `OPENAI_BASE_URL` and `MODEL` in the sandbox's
-  `env:`, passed as `sandbox create --env` (as OpenShell documents).
+  are the sandbox's `inference:` settings (`protocol: openai`, `baseUrl`,
+  `model`), which the agent is onboarded with.
 - OpenClaw is onboarded against the endpoint's own URL, with the placeholder
   key the sandbox holds in `OPENAI_API_KEY`. The sandbox proxy replaces the
   placeholder with the real key only on requests to an endpoint of the
@@ -46,11 +46,11 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 
 3. Restart the VM (`make saw-restart`) so the installer applies it.
 
-> The `custom-inference` profile's `notebook` sandbox reads `OPENAI_BASE_URL`
-> (`url`) and `MODEL` (`model`) from the `inference` Secret through its `env:`.
-> The URL is validated as a base URL and OpenClaw is onboarded against it; the
-> RHDH form asks for both. See
-> [Providers and sandbox environment](versioned-bom-installer.md#providers-and-sandbox-environment).
+> The `custom-inference` profile's `notebook` sandbox reads the endpoint
+> (`url`) and model (`model`) from the `inference` Secret through its
+> `inference:` block (`secretKeyRef`). The URL is validated as a base URL and
+> OpenClaw is onboarded against it; the RHDH form asks for both. See
+> [Providers, inference and sandbox environment](versioned-bom-installer.md#providers-inference-and-sandbox-environment).
 
 ## Requirements
 
@@ -70,7 +70,7 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
   governance on, the gateway uses only the governance catalog: set the
   `host`/`port` of the endpoint in `charts/governance-policy/profiles/openai.yaml`
   to your server's (keep `binaries`: OpenClaw runs under `node`). The
-  sandbox's `OPENAI_BASE_URL` alone is not enough: OpenShell never sends
+  sandbox's `inference.baseUrl` alone is not enough: OpenShell never sends
   the key to a host the profile does not name (OpenShell recommends a
   custom profile for an alternate host rather than reusing `openai`).
 - `inferenceTimeout` is still accepted but no longer used: there is no

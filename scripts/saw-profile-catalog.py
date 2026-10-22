@@ -46,17 +46,31 @@ def load(path):
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def input_field(src, kind, fallback_title):
+    """A form field for a typed input ({secretKeyRef: {name, key}, default?,
+    required?, title?}), as the installer resolves it (resolve_input): the
+    field is required when it has no default, unless `required` says
+    otherwise; a default is kept even when empty, so the form and the
+    installer agree on what an absent value means."""
+    field = {"key": src["secretKeyRef"]["key"], "kind": kind,
+             "required": bool(src.get("required", "default" not in src)),
+             "title": src.get("title") or fallback_title}
+    if "default" in src and src["default"] is not None:
+        field["default"] = str(src["default"])
+    return field
+
+
 def secret_fields(provider):
     """The fields a provider reads from its Secret, as the installer does
     (resolve_credentials): the credential(s), and optionally a base URL and
     a model (the older provider-level fields)."""
     creds = provider.get("credentials")
-    if isinstance(creds, list) and creds:
+    if isinstance(creds, dict) and creds:
         fields = []
-        for i, entry in enumerate(creds):
+        for i, (cname, entry) in enumerate(creds.items()):
             fields.append({"key": entry["secretKey"], "kind": "secret", "required": True,
                            "title": entry.get("title") or ("API key" if i == 0 else
-                                                          f"Credential ({entry['secretKey']})")})
+                                                          f"Credential ({cname})")})
     else:
         fields = [{"key": provider.get("credentialSecretKey", "api_key"), "kind": "secret",
                    "required": True, "title": "API key"}]
@@ -72,19 +86,29 @@ def secret_fields(provider):
     return fields
 
 
-def sandbox_env_fields(sandbox):
-    """(secret, field) for each `env:` entry of a sandbox read from a Secret,
-    as the installer does (resolve_sandbox_env), so the RHDH form asks for
-    it: its `title` is the label, its `default` pre-fills the form. Literal
-    `value` entries are fixed by the profile and not asked for."""
+def secret_ref(src):
+    """(Secret name, key) of a {secretKeyRef: {name, key}} input, or None."""
+    ref = src.get("secretKeyRef") if isinstance(src, dict) else None
+    if isinstance(ref, dict) and ref.get("name") and ref.get("key"):
+        return ref["name"], ref["key"]
+    return None
+
+
+def sandbox_fields(sandbox):
+    """(secret, field) for each input a sandbox reads from a Secret, as the
+    installer does: its `inference:` settings (baseUrl: a URL field; model and
+    timeoutSeconds: text) and its `env:` entries. Literals are fixed by the
+    profile and not asked for."""
+    inference = sandbox.get("inference") or {}
+    for key, kind, title in (("baseUrl", "url", "Endpoint base URL"),
+                             ("model", "text", "Model"),
+                             ("timeoutSeconds", "text", "Request timeout (seconds)")):
+        src = inference.get(key)
+        if secret_ref(src):
+            yield secret_ref(src)[0], input_field(src, kind, f"{title} ({sandbox['name']})")
     for name, src in (sandbox.get("env") or {}).items():
-        if not isinstance(src, dict) or not src.get("secretKey") or not src.get("secret"):
-            continue
-        field = {"key": src["secretKey"], "kind": "url" if "URL" in str(name).upper() else "text",
-                 "required": True, "title": src.get("title") or str(name)}
-        if src.get("default") not in (None, ""):
-            field["default"] = str(src["default"])
-        yield src["secret"], field
+        if secret_ref(src):
+            yield secret_ref(src)[0], input_field(src, "text", str(name))
 
 
 def catalog():
@@ -120,11 +144,11 @@ def catalog():
                 for f in secret_fields(prov):
                     if f["key"] not in {x["key"] for x in entry["fields"]}:
                         entry["fields"].append(f)
-            # The workload settings a sandbox reads from a Secret.
+            # The inputs a sandbox reads from a Secret (inference, env).
             for sb in (load(wdir / "sandbox.yaml").get("spec") or {}).get("sandboxes") or []:
                 if not sb.get("enabled", True):
                     continue
-                for secret, f in sandbox_env_fields(sb):
+                for secret, f in sandbox_fields(sb):
                     entry = secrets.setdefault(secret, {"providers": [], "fields": []})
                     if f["key"] not in {x["key"] for x in entry["fields"]}:
                         entry["fields"].append(f)
@@ -270,10 +294,11 @@ def render_template(cat, for_user=False):
                                            f"(provider {spec['provider'] or '/'.join(spec['providers'])})")
                     string_data[f"{sname}.{field['key']}"] = "${{ secrets." + name + " }}"
                 else:
-                    if field.get("default"):
+                    if "default" in field:
                         prop["default"] = field["default"]
                     if field["kind"] == "url":
-                        prop["pattern"] = "^https?://"
+                        # An optional URL may be left blank.
+                        prop["pattern"] = "^https?://" if field.get("required") else "^(https?://.*)?$"
                     string_data[f"{sname}.{field['key']}"] = "${{ parameters." + name + " }}"
                 props[name] = prop
                 if field.get("required"):
