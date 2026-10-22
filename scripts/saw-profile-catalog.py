@@ -17,6 +17,11 @@ Helm chart can only read its own files:
 
     scripts/saw-profile-catalog.py            write both files
     scripts/saw-profile-catalog.py --check    fail when they are stale (CI)
+    scripts/saw-profile-catalog.py --list     print the files it writes
+
+`make catalog` runs it. Adding a profile needs nothing else: the pre-commit
+hook (`make git-hooks`) and the Profile catalog workflow regenerate these
+files when charts/saw-bom/profiles changes.
 """
 import argparse
 import json
@@ -392,7 +397,14 @@ def render_delete_template(for_user=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="fail when an output is stale")
+    parser.add_argument("--list", action="store_true",
+                        help="print the files this script writes, one per line, and exit")
     args = parser.parse_args(argv)
+    if args.list:
+        for path in (*CATALOG_OUTPUTS, TEMPLATE_OUTPUT, DELETE_TEMPLATE,
+                     ADMIN_TEMPLATE_OUTPUT, ADMIN_DELETE_TEMPLATE):
+            print(path.relative_to(ROOT))
+        return 0
     text = render()
     outputs = [(path, text) for path in CATALOG_OUTPUTS]
     outputs.append((TEMPLATE_OUTPUT, render_template(json.loads(text))))
@@ -411,8 +423,8 @@ def main(argv=None):
             path.write_text(text, encoding="utf-8")
             print(f"wrote {path.relative_to(ROOT)}")
     if stale:
-        print("stale profile catalog (run scripts/saw-profile-catalog.py): " + ", ".join(stale),
-              file=sys.stderr)
+        print("stale profile catalog (run `make catalog`, or scripts/saw-profile-catalog.py): "
+              + ", ".join(stale), file=sys.stderr)
         return 1
     return 0
 
