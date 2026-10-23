@@ -599,24 +599,25 @@ at most 8 KiB.
   the installer stopped before it), it may hold newer work than the
   archive, so it is archived again (the old archive replaced only once the
   new one verified) and the delete retried; nothing is ever restored over
-  it. Identity is decided from every signal known on both sides -- the
-  instance label, the gateway's own id when the CLI prints one, and, for
-  a sandbox from before the instance label (none on either side), its env
-  label -- and any signal that is known on both sides and differs is a
-  veto: a sandbox with the original's env but another gateway id is not
-  the original. A running sandbox that is neither the original nor the
-  replacement, or whose labels cannot be read while a restore is pending,
-  fails the apply (the error names the archive and the record); the
-  installer never guesses with a user's files, and never reports success
-  while a restore is pending. A
-  pending recreation is completed with the env it was started for; if the
-  profile changed meanwhile, the sandbox is recreated once more in the same
-  run, files carried over, so a successful apply always ends with the
-  current env (the installer service only restarts on failure). A sandbox
-  that reports an error is given time to recover before any of this is
-  decided, so a recovering replacement still gets its restore. The record
-  and the archive are removed in exactly one place: after the restored
-  files verify.
+  it. Identity is decided strictly, from the two strong signals only: the
+  instance label this installer stamps at create and the gateway's own id
+  when the CLI prints one. Every signal known on both sides is compared
+  and any that differs is a veto (matching instance labels never hide a
+  conflicting gateway id); a match needs an agreeing strong signal. An env
+  label never establishes identity. A running sandbox that is neither the
+  original nor the replacement, or whose labels cannot be read while a
+  restore is pending, fails the apply (the error names the archive and the
+  record); the installer never guesses with a user's files, and never
+  reports success while a restore is pending. A sandbox from before the
+  instance label, on a CLI that prints no id, therefore cannot be
+  recovered automatically after a failed delete: the apply says so and
+  what to do. A pending recreation's replacement is created with the env
+  the profile wants now and restored once; there is no intermediate
+  sandbox, and a successful apply always ends with the current env. A
+  sandbox that reports an error is given time to recover before any of
+  this is decided, so a recovering replacement still gets its restore. The
+  record and the archive are removed in exactly one place: after the
+  restored files verify.
 - **`inference.timeoutSeconds`** is OpenClaw's per-provider HTTP request
   timeout (`models.providers.<provider type>.timeoutSeconds`); it is unset
   again when the field is removed (OpenClaw's onboarding keeps an existing

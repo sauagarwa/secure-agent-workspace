@@ -1815,22 +1815,26 @@ def resolve_sandbox_env(ws, sb, secrets_dir):
 
 
 def same_sandbox(seen, recorded):
-    """Is the running sandbox the one the record describes? Each identity
-    signal known on BOTH sides must agree; any known-and-different signal is
-    a veto. Instance id and the gateway's native id are strong; the env
-    label alone decides only for a sandbox from before the instance label
-    (no instance on either side) when no stronger signal is available, since
-    every sandbox this installer creates carries an instance label."""
+    """Is the running sandbox the one the record describes?
+
+    Strict matching on the strong identity signals only -- the instance
+    label this installer stamps at create, and the gateway's own id when
+    the CLI prints one. EVERY signal known on both sides is compared before
+    any conclusion: one that differs is a veto, whatever the others say
+    (matching instance labels never hide a conflicting native id). A match
+    needs at least one agreeing strong signal. An env label never
+    establishes identity: it describes configuration, which can be rolled
+    back or copied, and it was behind two data-loss findings."""
+    agreed = False
     for key in ("instance", "native"):
         a, b = seen.get(key) or "", recorded.get(key) or ""
         if a and b:
             if a != b:
                 return False
-            return True                 # a strong signal agreed
-        if (a or b) and key == "instance":
+            agreed = True
+        elif key == "instance" and (a or b):
             return False                # one side labelled, the other not: different creates
-    # No strong signal on either side: a legacy sandbox. Its env must match.
-    return (seen.get("env") or "none") == (recorded.get("env") or "none")
+    return agreed
 
 
 def env_label(values):
@@ -3944,25 +3948,18 @@ class ProfileApplier:
         # The sandbox is now either running (recovered included) or missing:
         # only now look at what it is, so a recovering sandbox is reconciled
         # like any other.
-        pending = self.migrations.get(self.migration_key(ws, sb))
+        key = self.migration_key(ws, sb)
         labels = None
         if state == "running" and not self.sh.dry_run:
             labels = self.sandbox_labels(ws, sb)
-            if labels is None and pending:
-                # Never skip a pending restore because the sandbox could not
-                # be identified: fail, so the service retries.
-                raise InstallerError(
-                    f"sandbox '{sb.name}' in workspace '{ws.name}' has a pending restore but its "
-                    "labels cannot be read (`sandbox get` failed); nothing was changed, the apply "
-                    "is retried")
-        if state == "running" and pending and labels is not None:
-            if self.reconcile_migration(ws, sb, labels) == "recreating":
-                state = "missing"
-            pending = self.migrations.get(self.migration_key(ws, sb))
-        if state == "running" and labels is not None and not pending:
+        if key in self.migrations:
+            state = self.recover_migration(ws, sb, state, labels)
+            if state == "running":
+                labels = self.sandbox_labels(ws, sb) if not self.sh.dry_run else labels
+        if state == "running" and labels is not None and key not in self.migrations:
             have = labels[0] or "none"             # created before the label: had no env
             if have != env_label(sb.env_values):
-                self.recreate_for_env(ws, sb, labels)
+                self.begin_migration(ws, sb, labels)
                 state = "missing"
         if state == "running" and not self.sh.dry_run and not self.sandbox_mounts_ok(ws, sb):
             # Mounts are fixed at create: a sandbox created before its
@@ -3985,22 +3982,24 @@ class ProfileApplier:
             return
         if sb.image and ("/" in sb.image or ":" in sb.image):
             self.sh.run(["podman", "pull", sb.image], check=False, timeout=900)
-        # A pending recreation is completed with the env it was started
-        # for, whatever the profile says now: the restore must land in the
-        # sandbox it was meant for. If the profile changed meanwhile, the
-        # next apply sees the env label differ and recreates again, with
-        # the files carried over once more.
+        # The replacement of a pending recreation is created with the env
+        # the profile wants NOW (identity does not depend on the env, so
+        # there is no reason to materialise an intermediate one); the record
+        # is updated to say so, and its instance token identifies the
+        # replacement for the restore.
         pending = self.migrations.get(self.migration_key(ws, sb))
-        env_values = pending["env"] if pending else sb.env_values
+        if pending and pending.get("env") != sb.env_values:
+            pending["env"] = dict(sb.env_values)
+            self.save_migrations()
         instance = pending["toInstance"] if pending else secrets.token_hex(8)
         args = ["sandbox", "create", "--name", sb.name, "--label", MANAGED_LABEL,
-                "--label", f"{ENV_LABEL_KEY}={env_label(env_values)}",
+                "--label", f"{ENV_LABEL_KEY}={env_label(sb.env_values)}",
                 "--label", f"{INSTANCE_LABEL_KEY}={instance}"]
         if sb.image:
             args += ["--from", sb.image]
         args += ws_args(ws.name)
         # The workload's environment, for every process in the sandbox.
-        args += env_flags(env_values)
+        args += env_flags(sb.env_values)
         if sandbox_mounts(ws, sb):
             args += ["--driver-config-json", sandbox_mounts_json(ws, sb)]
         for prov in sb.providers:
@@ -4013,16 +4012,9 @@ class ProfileApplier:
         self.cli(*args, timeout=900)
         self.remember("sandbox", ws.name, sb.name)
         if pending:
-            self.reconcile_migration(ws, sb, (env_label(env_values), instance, ""))
-            if env_values != sb.env_values:
-                # The profile moved on while the recreation was pending: the
-                # files are safely back, so bring the env up to date now,
-                # in this run -- there is no "next apply" to leave it to
-                # (the installer service only restarts on failure).
-                log(f"Sandbox '{sb.name}' was recreated with the environment its recreation "
-                    "started for; the profile has changed since, recreating it once more")
-                self.create_sandbox(ws, sb, configure_harness)
-                return
+            # The replacement exists now: restore into it (by its token).
+            self.recover_migration(ws, sb, "running",
+                                   (env_label(sb.env_values), instance, ""))
 
     def attach_missing_providers(self, ws, sb):
         """A sandbox created while one of its providers was skipped (e.g. no
@@ -4793,35 +4785,56 @@ class ProfileApplier:
             except OSError:
                 pass
 
-    def reconcile_migration(self, ws, sb, labels):
-        """A recreation is pending for this sandbox (its record holds the
-        archive, the original's instance id `fromInstance`, the env the
-        replacement is to be created with `env`, and the replacement's
-        instance id `toInstance`) and a sandbox of that name is running.
-        Identity is the instance label, never the env label (the desired
-        env can be rolled back, which would make a fresh empty replacement
-        look like the original). Returns what create_sandbox should do:
+    def begin_migration(self, ws, sb, labels):
+        """Start recreating a running sandbox whose env differs from the
+        profile's: archive and verify its /sandbox, persist the record (the
+        original's identity, the replacement's instance token and the env
+        it will be created with), then delete it. The record exists before
+        anything is destroyed, so every later apply can finish the job."""
+        log(f"Sandbox '{sb.name}' was created with a different environment; recreating it "
+            "(its /sandbox files are carried over, open sessions end)")
+        self.wait_exec_ready(ws, sb)
+        record = self.preserve_sandbox(ws, sb)
+        record.update({"fromInstance": labels[1] or "", "fromNative": labels[2] or "",
+                       "env": dict(sb.env_values), "toInstance": secrets.token_hex(8)})
+        self.migrations[self.migration_key(ws, sb)] = record
+        self.save_migrations()
+        self.delete_sandbox_and_wait(ws, sb)
 
-        - "restored": the running sandbox is the replacement; its files are
-          back and the record is gone;
-        - "recreating": the running sandbox is the original (the delete did
-          not happen); it was archived again (replacing the record's archive
-          only once the new one verified) and deleted;
-        - "unknown": neither; nothing is touched."""
-        record = self.migrations[self.migration_key(ws, sb)]
+    def recover_migration(self, ws, sb, state, labels):
+        """One pending recreation, one decision. Given the sandbox's state and
+        (when running) its identity, returns the state create_sandbox should
+        continue from:
+
+        - replacement running  -> restore and verify into it; "running"
+        - original running     -> refresh its archive (replacing the old one
+                                  only once the new one verified), delete it;
+                                  "missing"
+        - nothing running      -> "missing" (create the replacement, restore)
+        - identity differs or cannot be read -> InstallerError; nothing is
+                                  changed, the service retries
+
+        Identity is decided by same_sandbox() on the strong signals only."""
+        key = self.migration_key(ws, sb)
+        record = self.migrations[key]
+        if state != "running":
+            return "missing"
+        if labels is None:
+            raise InstallerError(
+                f"sandbox '{sb.name}' in workspace '{ws.name}' has a pending restore but its "
+                "labels cannot be read (`sandbox get` failed); nothing was changed, the apply "
+                "is retried")
         env_now, instance, native = labels
-        is_original = same_sandbox(
-            {"instance": instance, "native": native, "env": env_now or "none"},
-            {"instance": record.get("fromInstance", ""), "native": record.get("fromNative", ""),
-             "env": record.get("fromEnv") or "none"})
-        if instance and instance == record.get("toInstance"):
+        seen = {"instance": instance, "native": native}
+        if same_sandbox(seen, {"instance": record.get("toInstance", ""), "native": ""}):
             log(f"Finishing the recreation of sandbox '{sb.name}': restoring its files")
             self.wait_exec_ready(ws, sb)
             self.restore_sandbox(ws, sb, record)
             self.complete_migration(ws, sb)
             log(f"Sandbox '{sb.name}': files restored")
-            return "restored"
-        if is_original:
+            return "running"
+        if same_sandbox(seen, {"instance": record.get("fromInstance", ""),
+                               "native": record.get("fromNative", "")}):
             log(f"Sandbox '{sb.name}' is still the original (an earlier recreation did not get "
                 "to delete it); archiving it again and retrying")
             fresh = self.preserve_sandbox(ws, sb)       # verified before anything changes
@@ -4834,31 +4847,13 @@ class ProfileApplier:
                 except OSError:
                     pass
             self.delete_sandbox_and_wait(ws, sb)
-            return "recreating"
-        # Neither: never guess with a user's files at stake, and never report
-        # success either -- the apply fails until someone resolves it.
+            return "missing"
         raise InstallerError(
             f"sandbox '{sb.name}' in workspace '{ws.name}' has a pending restore but is neither "
             f"the sandbox it was taken from nor its replacement (instance "
-            f"{instance or 'unlabelled'}, env {env_now or 'none'}). Its files are in "
+            f"{instance or 'unlabelled'}, gateway id {native or 'unknown'}). Its files are in "
             f"{record['archive']}. Delete the sandbox to let the installer recreate and restore "
             f"it, or remove the entry from {self.migrations_path} to keep the sandbox as it is")
-
-    def recreate_for_env(self, ws, sb, labels):
-        """The running sandbox was created with another environment, which is
-        fixed at create (no `sandbox update`): archive its /sandbox, record
-        the pending restore, and only then delete it; create_sandbox makes
-        the replacement and restores the files."""
-        log(f"Sandbox '{sb.name}' was created with a different environment; recreating it "
-            "(its /sandbox files are carried over, open sessions end)")
-        self.wait_exec_ready(ws, sb)
-        record = self.preserve_sandbox(ws, sb)
-        record.update({"fromInstance": labels[1] or "", "fromNative": labels[2] or "",
-                       "fromEnv": labels[0] or "none", "env": dict(sb.env_values),
-                       "toInstance": secrets.token_hex(8)})
-        self.migrations[self.migration_key(ws, sb)] = record
-        self.save_migrations()                       # before the delete: never lost
-        self.delete_sandbox_and_wait(ws, sb)
 
     def _sandbox_labeled(self, workspace, name):
         got = self.cli("sandbox", "get", name, *ws_args(workspace),
