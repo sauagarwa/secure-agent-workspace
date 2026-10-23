@@ -12,11 +12,13 @@ spec:
       providers:
         - custom
       # How the agent reaches its model: the `custom` provider's credential,
-      # the OpenAI protocol, and the endpoint and model from the `inference`
-      # Secret (the RHDH form asks for both). The provider's profile must
-      # name the endpoint's host (docs/custom-inference.md).
+      # the OpenAI protocol (stated: the installer cannot infer it for a
+      # deployment's own profile type), and the endpoint and model from the
+      # `inference` Secret (the RHDH form asks for both). The provider's
+      # profile must name the endpoint's host (docs/custom-inference.md).
       inference:
         providerRef: custom
+        protocol: openai
         baseUrl:
           secretKeyRef:
             name: inference
