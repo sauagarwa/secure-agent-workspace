@@ -3987,11 +3987,16 @@ class ProfileApplier:
         self.cli(*args, timeout=900)
         self.remember("sandbox", ws.name, sb.name)
         if pending:
-            self.reconcile_migration(ws, sb, (env_label(env_values), instance))
+            self.reconcile_migration(ws, sb, (env_label(env_values), instance, ""))
             if env_values != sb.env_values:
+                # The profile moved on while the recreation was pending: the
+                # files are safely back, so bring the env up to date now,
+                # in this run -- there is no "next apply" to leave it to
+                # (the installer service only restarts on failure).
                 log(f"Sandbox '{sb.name}' was recreated with the environment its recreation "
-                    "started for; the profile has changed since, so the next apply recreates "
-                    "it again (files carried over)")
+                    "started for; the profile has changed since, recreating it once more")
+                self.create_sandbox(ws, sb, configure_harness)
+                return
 
     def attach_missing_providers(self, ws, sb):
         """A sandbox created while one of its providers was skipped (e.g. no
@@ -4643,20 +4648,26 @@ class ProfileApplier:
         return got.ok and _managed_label_in_text(blob)
 
     def sandbox_labels(self, ws, sb):
-        """The env digest and the instance id a running sandbox was created
-        with ("" for an unset label); None when they cannot be read."""
+        """What identifies a running sandbox: (env digest, instance id, native
+        id) -- the two labels it was created with ("" when unset) and the
+        gateway's own id for it when the CLI prints one ("" otherwise).
+        None when none of it can be read."""
         keys = (ENV_LABEL_KEY, INSTANCE_LABEL_KEY)
         got = self.cli("sandbox", "get", sb.name, *ws_args(ws.name),
                        "--output", "json", check=False, quiet=True)
         if got.ok:
             values = [_label_from_json(got.out, k) for k in keys]
             if values[0] is None:
-                values = [_label_from_text(got.out, k) for k in keys]
-            return tuple(values)
+                return (*(_label_from_text(got.out, k) for k in keys), "")
+            try:
+                native = json.loads(got.out).get("id") or ""
+            except (json.JSONDecodeError, AttributeError):
+                native = ""
+            return (*values, str(native))
         if not _cli_rejected_output_flag(got.out + "\n" + got.err):
             return None
         got = self.cli("sandbox", "get", sb.name, *ws_args(ws.name), check=False, quiet=True)
-        return tuple(_label_from_text(got.out, k) for k in keys) if got.ok else None
+        return (*(_label_from_text(got.out, k) for k in keys), "") if got.ok else None
 
     def sandbox_env_label(self, ws, sb):
         labels = self.sandbox_labels(ws, sb)
@@ -4772,7 +4783,16 @@ class ProfileApplier:
           only once the new one verified) and deleted;
         - "unknown": neither; nothing is touched."""
         record = self.migrations[self.migration_key(ws, sb)]
-        env_now, instance = labels
+        env_now, instance, native = labels
+        is_original = (
+            (instance and instance == record.get("fromInstance"))
+            or (native and native == record.get("fromNative"))
+            # A sandbox from before the instance label has none; every
+            # sandbox this installer creates has one, so an unlabelled one
+            # can only be the original -- provided it still carries the
+            # env the original had.
+            or (not instance and not record.get("fromInstance")
+                and env_now == record.get("fromEnv")))
         if instance and instance == record.get("toInstance"):
             log(f"Finishing the recreation of sandbox '{sb.name}': restoring its files")
             self.wait_exec_ready(ws, sb)
@@ -4780,7 +4800,7 @@ class ProfileApplier:
             self.complete_migration(ws, sb)
             log(f"Sandbox '{sb.name}': files restored")
             return "restored"
-        if instance and instance == record.get("fromInstance"):
+        if is_original:
             log(f"Sandbox '{sb.name}' is still the original (an earlier recreation did not get "
                 "to delete it); archiving it again and retrying")
             fresh = self.preserve_sandbox(ws, sb)       # verified before anything changes
@@ -4794,10 +4814,14 @@ class ProfileApplier:
                     pass
             self.delete_sandbox_and_wait(ws, sb)
             return "recreating"
-        log(f"WARN: sandbox '{sb.name}' has a pending restore but is neither the sandbox it was "
-            f"taken from nor its replacement (instance {instance or 'unlabelled'}); leaving it "
-            f"and the archive {record['archive']} as they are")
-        return "unknown"
+        # Neither: never guess with a user's files at stake, and never report
+        # success either -- the apply fails until someone resolves it.
+        raise InstallerError(
+            f"sandbox '{sb.name}' in workspace '{ws.name}' has a pending restore but is neither "
+            f"the sandbox it was taken from nor its replacement (instance "
+            f"{instance or 'unlabelled'}, env {env_now or 'none'}). Its files are in "
+            f"{record['archive']}. Delete the sandbox to let the installer recreate and restore "
+            f"it, or remove the entry from {self.migrations_path} to keep the sandbox as it is")
 
     def recreate_for_env(self, ws, sb, labels):
         """The running sandbox was created with another environment, which is
@@ -4808,7 +4832,8 @@ class ProfileApplier:
             "(its /sandbox files are carried over, open sessions end)")
         self.wait_exec_ready(ws, sb)
         record = self.preserve_sandbox(ws, sb)
-        record.update({"fromInstance": labels[1] or "", "env": dict(sb.env_values),
+        record.update({"fromInstance": labels[1] or "", "fromNative": labels[2] or "",
+                       "fromEnv": labels[0] or "none", "env": dict(sb.env_values),
                        "toInstance": secrets.token_hex(8)})
         self.migrations[self.migration_key(ws, sb)] = record
         self.save_migrations()                       # before the delete: never lost

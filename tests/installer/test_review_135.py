@@ -378,17 +378,14 @@ def test_rolling_the_env_back_during_recovery_keeps_the_files(ab, fake_env, conf
     sandbox.env = {"A": {"value": "1"}}                              # rolled back
     creds = ab.resolve_credentials(profiles, tmp_path)
     ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
-    # First apply: the pending recreation is completed with the env it was
-    # started for (A=2) and the files restored into it.
-    after = fake_env.openshell_state()["sandboxes"]["default/chat"]
-    assert after["files"] == {"notes.md": "keep me"}
-    assert after["env"] == ["A=2"]
-    assert _migrations(tmp_path) == {} and not archive.exists()
-    # Second apply: the profile says A=1, so a normal recreation, files kept.
-    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    # One apply: the pending recreation is completed with the env it was
+    # started for (A=2), the files restored into it, and -- the profile
+    # saying A=1 -- it is recreated once more, files kept.
     final = fake_env.openshell_state()["sandboxes"]["default/chat"]
     assert final["files"] == {"notes.md": "keep me"} and final["env"] == ["A=1"]
-    assert _migrations(tmp_path) == {}
+    assert _migrations(tmp_path) == {} and not archive.exists()
+    ops = [" ".join(c[:2]) for c in fake_env.openshell_calls()]
+    assert ops.count("sandbox create") == 3           # original, A=2 replacement, A=1
 
 
 def test_changing_the_env_again_during_recovery_keeps_the_files(ab, fake_env, config, tmp_path):
@@ -399,9 +396,9 @@ def test_changing_the_env_again_during_recovery_keeps_the_files(ab, fake_env, co
     sandbox.env = {"A": {"value": "3"}}
     creds = ab.resolve_credentials(profiles, tmp_path)
     ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
-    after = fake_env.openshell_state()["sandboxes"]["default/chat"]
-    assert after["files"] == {"notes.md": "keep me"}                 # restored, not lost
-    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    # Review (79411bca, P2): one apply ends with the files AND the current
+    # env -- the installer service only restarts on failure, so a
+    # successful apply must not leave settings for a "next" one.
     final = fake_env.openshell_state()["sandboxes"]["default/chat"]
     assert final["files"] == {"notes.md": "keep me"} and final["env"] == ["A=3"]
     assert _migrations(tmp_path) == {}
@@ -444,6 +441,59 @@ def test_a_sandbox_recovering_from_error_still_gets_its_restore(ab, fake_env, co
     final = fake_env.openshell_state()["sandboxes"]["default/chat"]
     assert final["files"] == {"notes.md": "keep me"} and final["env"] == ["A=2"]
     assert _migrations(tmp_path) == {} and not archive.exists()
+
+
+def test_a_pre_existing_sandbox_recovers_from_a_failed_delete(ab, fake_env, config, tmp_path,
+                                                             monkeypatch):
+    """Review (79411bca, P2): a sandbox from before the instance label has
+    none. A failed recreation must still be finished on the next apply, not
+    report success forever with the old env and a pending migration."""
+    monkeypatch.setattr(ab.ProfileApplier, "POLL_SECONDS", 0)
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    cfg = _ledger_cfg(config, tmp_path)
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    # Make it look like a sandbox created by an older installer: no instance label.
+    state = fake_env.openshell_state()
+    state["labels"]["sandbox/default/chat"] = [
+        l for l in state["labels"]["sandbox/default/chat"] if not l.startswith("saw.redhat.com/instance=")]
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "keep me"}
+    fake_env.set_openshell_state(state)
+
+    sandbox.env = {"A": {"value": "2"}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    fake_env.deny("sandbox delete")
+    with pytest.raises(ab.InstallerError):
+        ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    assert _migrations(tmp_path)["default/chat"]["fromInstance"] == ""
+
+    fake_env.deny()
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    final = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert final["env"] == ["A=2"] and final["files"] == {"notes.md": "keep me"}
+    assert _migrations(tmp_path) == {}
+
+
+def test_an_unresolvable_identity_fails_the_apply(ab, fake_env, config, tmp_path):
+    """Neither the original nor the replacement: refuse to guess, and never
+    report success while a restore is pending."""
+    sandbox, profiles, cfg, archive = _interrupted_recreation(
+        ab, fake_env, config, tmp_path, {"A": {"value": "2"}})
+    # Someone else created a sandbox of that name in the meantime.
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"] = {"image": None, "providers": ["inference"],
+                                          "phase": "Ready", "env": ["A=9"], "files": {"theirs": "x"}}
+    state["labels"]["sandbox/default/chat"] = ["saw.redhat.com/managed=true",
+                                               "saw.redhat.com/env=zzzz", "saw.redhat.com/instance=other"]
+    fake_env.set_openshell_state(state)
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    for _ in range(2):
+        with pytest.raises(ab.InstallerError, match="neither the sandbox it was taken from nor"):
+            ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    other = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert other["files"] == {"theirs": "x"} and other["env"] == ["A=9"]   # untouched
+    assert archive.is_file() and "default/chat" in _migrations(tmp_path)
 
 
 # --- 3. a custom provider type drives inference by protocol -----------------------------

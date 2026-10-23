@@ -599,13 +599,21 @@ at most 8 KiB.
   the installer stopped before it), it may hold newer work than the
   archive, so it is archived again (the old archive replaced only once the
   new one verified) and the delete retried; nothing is ever restored over
-  it. A pending recreation is completed with the env it was started for,
-  whatever the profile says now; if the profile changed meanwhile, the next
-  apply recreates again, files carried over. A sandbox that reports an
-  error is given time to recover before any of this is decided, so a
-  recovering replacement still gets its restore. The record and the
-  archive are removed in exactly one place: after the restored files
-  verify.
+  it. A sandbox created before the instance label existed is recognised
+  as the original by the gateway's own id for it when the CLI prints one,
+  else by having no instance label (every sandbox this installer creates
+  has one) and the original's env label. A running sandbox that is neither
+  the original nor the replacement fails the apply (the error names the
+  archive and the record to remove); the installer never guesses with a
+  user's files, and never reports success while a restore is pending. A
+  pending recreation is completed with the env it was started for; if the
+  profile changed meanwhile, the sandbox is recreated once more in the same
+  run, files carried over, so a successful apply always ends with the
+  current env (the installer service only restarts on failure). A sandbox
+  that reports an error is given time to recover before any of this is
+  decided, so a recovering replacement still gets its restore. The record
+  and the archive are removed in exactly one place: after the restored
+  files verify.
 - **`inference.timeoutSeconds`** is OpenClaw's per-provider HTTP request
   timeout (`models.providers.<provider type>.timeoutSeconds`); it is unset
   again when the field is removed (OpenClaw's onboarding keeps an existing
