@@ -1814,6 +1814,25 @@ def resolve_sandbox_env(ws, sb, secrets_dir):
     return out
 
 
+def same_sandbox(seen, recorded):
+    """Is the running sandbox the one the record describes? Each identity
+    signal known on BOTH sides must agree; any known-and-different signal is
+    a veto. Instance id and the gateway's native id are strong; the env
+    label alone decides only for a sandbox from before the instance label
+    (no instance on either side) when no stronger signal is available, since
+    every sandbox this installer creates carries an instance label."""
+    for key in ("instance", "native"):
+        a, b = seen.get(key) or "", recorded.get(key) or ""
+        if a and b:
+            if a != b:
+                return False
+            return True                 # a strong signal agreed
+        if (a or b) and key == "instance":
+            return False                # one side labelled, the other not: different creates
+    # No strong signal on either side: a legacy sandbox. Its env must match.
+    return (seen.get("env") or "none") == (recorded.get("env") or "none")
+
+
 def env_label(values):
     """The digest of a sandbox env kept in its `saw.redhat.com/env` label:
     "none" for no env (a label, not "", so a sandbox created before this
@@ -3929,6 +3948,13 @@ class ProfileApplier:
         labels = None
         if state == "running" and not self.sh.dry_run:
             labels = self.sandbox_labels(ws, sb)
+            if labels is None and pending:
+                # Never skip a pending restore because the sandbox could not
+                # be identified: fail, so the service retries.
+                raise InstallerError(
+                    f"sandbox '{sb.name}' in workspace '{ws.name}' has a pending restore but its "
+                    "labels cannot be read (`sandbox get` failed); nothing was changed, the apply "
+                    "is retried")
         if state == "running" and pending and labels is not None:
             if self.reconcile_migration(ws, sb, labels) == "recreating":
                 state = "missing"
@@ -4784,15 +4810,10 @@ class ProfileApplier:
         - "unknown": neither; nothing is touched."""
         record = self.migrations[self.migration_key(ws, sb)]
         env_now, instance, native = labels
-        is_original = (
-            (instance and instance == record.get("fromInstance"))
-            or (native and native == record.get("fromNative"))
-            # A sandbox from before the instance label has none; every
-            # sandbox this installer creates has one, so an unlabelled one
-            # can only be the original -- provided it still carries the
-            # env the original had.
-            or (not instance and not record.get("fromInstance")
-                and env_now == record.get("fromEnv")))
+        is_original = same_sandbox(
+            {"instance": instance, "native": native, "env": env_now or "none"},
+            {"instance": record.get("fromInstance", ""), "native": record.get("fromNative", ""),
+             "env": record.get("fromEnv") or "none"})
         if instance and instance == record.get("toInstance"):
             log(f"Finishing the recreation of sandbox '{sb.name}': restoring its files")
             self.wait_exec_ready(ws, sb)

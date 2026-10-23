@@ -267,6 +267,9 @@ elif op == "sandbox get":
     fmt = output_format()
     if fmt == "json" and (state_dir / "reject-json").exists():
         fail("error: unexpected argument '--output' found")
+    if fmt == "json" and (state_dir / "json-get-fails").exists():
+        # A gateway hiccup on the detailed get only (the plain get works).
+        fail("Error: status: Unavailable, message: \"gateway busy\"", 1)
     key = f"{ws}/{name}"
     sb = state["sandboxes"].get(key)
     # "after": [gets, then]: the phase changes after that many gets; then
@@ -285,7 +288,10 @@ elif op == "sandbox get":
         fail(f"Error: sandbox '{name}' not found")
     labels = labels_dict("sandbox", ws, name)
     if fmt == "json":
-        print(json.dumps({"name": name, "phase": sb["phase"], "workspace": ws, "labels": labels}))
+        doc = {"name": name, "phase": sb["phase"], "workspace": ws, "labels": labels}
+        if sb.get("nativeId"):               # a CLI that prints the gateway's own id
+            doc["id"] = sb["nativeId"]
+        print(json.dumps(doc))
     else:
         print(f"Name: {name}\nPhase: {sb['phase']}")
         if labels:

@@ -347,7 +347,7 @@ def _migrations(tmp_path):
     return json.loads((tmp_path / "state" / "sandbox-migrations.json").read_text())
 
 
-def _interrupted_recreation(ab, fake_env, config, tmp_path, new_env):
+def _interrupted_recreation(ab, fake_env, config, tmp_path, new_env, native_id=""):
     """Create with A=1 and a user file, start a recreation to `new_env`, and
     stop right after the delete (before the replacement is created)."""
     _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
@@ -357,6 +357,8 @@ def _interrupted_recreation(ab, fake_env, config, tmp_path, new_env):
     ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
     state = fake_env.openshell_state()
     state["sandboxes"]["default/chat"]["files"] = {"notes.md": "keep me"}
+    if native_id:
+        state["sandboxes"]["default/chat"]["nativeId"] = native_id
     fake_env.set_openshell_state(state)
     sandbox.env = new_env
     creds = ab.resolve_credentials(profiles, tmp_path)
@@ -494,6 +496,103 @@ def test_an_unresolvable_identity_fails_the_apply(ab, fake_env, config, tmp_path
     other = fake_env.openshell_state()["sandboxes"]["default/chat"]
     assert other["files"] == {"theirs": "x"} and other["env"] == ["A=9"]   # untouched
     assert archive.is_file() and "default/chat" in _migrations(tmp_path)
+
+
+@pytest.mark.parametrize("seen,recorded,same", [
+    # instance agrees / disagrees: decisive
+    ({"instance": "i1", "native": "", "env": "e"}, {"instance": "i1", "native": "", "env": "x"}, True),
+    ({"instance": "i1", "native": "", "env": "e"}, {"instance": "i2", "native": "", "env": "e"}, False),
+    # one side labelled, the other not: different creates, whatever the env
+    ({"instance": "", "native": "", "env": "e"}, {"instance": "i1", "native": "", "env": "e"}, False),
+    ({"instance": "i1", "native": "", "env": "e"}, {"instance": "", "native": "", "env": "e"}, False),
+    # native id known on both sides: decisive, and a mismatch vetoes the env fallback
+    ({"instance": "", "native": "n1", "env": "e"}, {"instance": "", "native": "n1", "env": "x"}, True),
+    ({"instance": "", "native": "n1", "env": "e"}, {"instance": "", "native": "n2", "env": "e"}, False),
+    # legacy: nothing strong on either side -> env decides, "" and "none" alike
+    ({"instance": "", "native": "", "env": ""}, {"instance": "", "native": "", "env": "none"}, True),
+    ({"instance": "", "native": "", "env": "none"}, {"instance": "", "native": "", "env": ""}, True),
+    ({"instance": "", "native": "", "env": "e1"}, {"instance": "", "native": "", "env": "e2"}, False),
+    # native known on one side only: no information, fall through to env
+    ({"instance": "", "native": "n1", "env": "e"}, {"instance": "", "native": "", "env": "e"}, True),
+])
+def test_identity_decision_table(ab, seen, recorded, same):
+    assert ab.same_sandbox(seen, recorded) is same
+
+
+def test_a_native_id_mismatch_vetoes_the_env_fallback(ab, fake_env, config, tmp_path):
+    """Review (2b9dabec, P1): an unlabelled sandbox with the original's env
+    but a different gateway id is NOT the original. Nothing is archived,
+    deleted or replaced; the apply fails."""
+    sandbox, profiles, cfg, archive = _interrupted_recreation(
+        ab, fake_env, config, tmp_path, {"A": {"value": "2"}}, native_id="orig-123")
+    before = archive.read_bytes()
+    # An unrelated, unlabelled sandbox with the original's env appears.
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"] = {"image": None, "providers": ["inference"], "phase": "Ready",
+                                          "env": ["A=1"], "files": {"theirs": "x"}, "nativeId": "other-999"}
+    state["labels"]["sandbox/default/chat"] = ["saw.redhat.com/managed=true",
+                                               "saw.redhat.com/env=" + ab.env_label({"A": "1"})]
+    fake_env.set_openshell_state(state)
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    before_calls = len(fake_env.openshell_calls())
+    with pytest.raises(ab.InstallerError, match="neither the sandbox it was taken from nor"):
+        ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    ops = [" ".join(c[:2]) for c in fake_env.openshell_calls()[before_calls:]]
+    assert "sandbox delete" not in ops and "sandbox download" not in ops
+    assert archive.read_bytes() == before                             # the original archive, untouched
+    assert fake_env.openshell_state()["sandboxes"]["default/chat"]["files"] == {"theirs": "x"}
+
+
+def test_a_fully_unlabelled_legacy_sandbox_recovers(ab, fake_env, config, tmp_path, monkeypatch):
+    """Review (2b9dabec, P2): neither instance nor env label, no native id;
+    a failed delete is still recovered on the next apply."""
+    monkeypatch.setattr(ab.ProfileApplier, "POLL_SECONDS", 0)
+    _, sandbox, profiles = _env_sandbox(ab, {})                      # legacy: created with no env
+    _secret(tmp_path, "inference", api_key="k")
+    cfg = _ledger_cfg(config, tmp_path)
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    state = fake_env.openshell_state()
+    state["labels"]["sandbox/default/chat"] = ["saw.redhat.com/managed=true"]   # strip both labels
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "keep me"}
+    fake_env.set_openshell_state(state)
+
+    sandbox.env = {"A": {"value": "1"}}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    fake_env.deny("sandbox delete")
+    with pytest.raises(ab.InstallerError):
+        ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    rec = _migrations(tmp_path)["default/chat"]
+    assert rec["fromInstance"] == "" and rec["fromEnv"] == "none"
+    fake_env.deny()
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    final = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert final["env"] == ["A=1"] and final["files"] == {"notes.md": "keep me"}
+    assert _migrations(tmp_path) == {}
+
+
+def test_unreadable_identity_with_a_pending_restore_fails_the_apply(ab, fake_env, config, tmp_path):
+    """Review (2b9dabec, P2): if `sandbox get` cannot be read while a restore
+    is pending, the apply fails (so the service retries) instead of
+    succeeding with the files unrestored."""
+    sandbox, profiles, cfg, archive = _interrupted_recreation(
+        ab, fake_env, config, tmp_path, {"A": {"value": "2"}})
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    # The replacement exists (created by a run that then failed to restore)...
+    (fake_env.state / "restore-fail").write_text("")
+    with pytest.raises(ab.InstallerError, match="retried"):
+        ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    (fake_env.state / "restore-fail").unlink()
+    # ...and now the detailed `sandbox get --output json` fails (the plain
+    # get, which says the sandbox is running, still works).
+    (fake_env.state / "json-get-fails").write_text("")
+    with pytest.raises(ab.InstallerError, match="labels cannot be read"):
+        ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    assert archive.is_file() and "default/chat" in _migrations(tmp_path)
+    assert "notes.md" not in fake_env.openshell_state()["sandboxes"]["default/chat"].get("files", {})
+    (fake_env.state / "json-get-fails").unlink()
+    ab.ProfileApplier(ab.Shell(), cfg, creds).apply(profiles)
+    assert fake_env.openshell_state()["sandboxes"]["default/chat"]["files"] == {"notes.md": "keep me"}
 
 
 # --- 3. a custom provider type drives inference by protocol -----------------------------

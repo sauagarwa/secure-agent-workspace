@@ -599,13 +599,16 @@ at most 8 KiB.
   the installer stopped before it), it may hold newer work than the
   archive, so it is archived again (the old archive replaced only once the
   new one verified) and the delete retried; nothing is ever restored over
-  it. A sandbox created before the instance label existed is recognised
-  as the original by the gateway's own id for it when the CLI prints one,
-  else by having no instance label (every sandbox this installer creates
-  has one) and the original's env label. A running sandbox that is neither
-  the original nor the replacement fails the apply (the error names the
-  archive and the record to remove); the installer never guesses with a
-  user's files, and never reports success while a restore is pending. A
+  it. Identity is decided from every signal known on both sides -- the
+  instance label, the gateway's own id when the CLI prints one, and, for
+  a sandbox from before the instance label (none on either side), its env
+  label -- and any signal that is known on both sides and differs is a
+  veto: a sandbox with the original's env but another gateway id is not
+  the original. A running sandbox that is neither the original nor the
+  replacement, or whose labels cannot be read while a restore is pending,
+  fails the apply (the error names the archive and the record); the
+  installer never guesses with a user's files, and never reports success
+  while a restore is pending. A
   pending recreation is completed with the env it was started for; if the
   profile changed meanwhile, the sandbox is recreated once more in the same
   run, files carried over, so a successful apply always ends with the
