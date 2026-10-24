@@ -462,6 +462,12 @@ elif op == "sandbox exec":
         print("\n".join(n for n in names if n in have))
         save()
         sys.exit(0)
+    if script.startswith("cat /sandbox/.openclaw/saw-mcp-servers.json"):
+        # The installer's read of its MCP record (`cat FILE 2>/dev/null || true`):
+        # empty, and no error, before the first record.
+        print(sb.get("sawMcpState", ""))
+        save()
+        sys.exit(0)
     if "saw-mcp-servers.json" in script:
         # configure_harness_mcp: unset/set mcp.servers.<name>, then record them.
         # The script runs under set -e: mcp-set-fails.json (server names)

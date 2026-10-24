@@ -4325,8 +4325,11 @@ class ProfileApplier:
                      check=False)
         for key in HARNESS_CONFIG_KEYS:
             if key not in desired:
-                self.cli(*exec_cmd, "sh", "-c", f"{oc_env} openclaw config unset {key}",
-                         check=False)
+                # Conditional: `config unset` of an absent path logs an
+                # error on every apply (found live).
+                self.cli(*exec_cmd, "sh", "-c",
+                         f"{oc_env} openclaw config get {key} >/dev/null 2>&1 && "
+                         f"{oc_env} openclaw config unset {key} || true", check=False)
         # OpenClaw 2026.9.x keeps a plugin found on plugins.load.paths
         # disabled until it is enabled with capability consent, and a
         # restrictive plugins.allow (NemoClaw ships one) blocks it outright;
@@ -4356,7 +4359,9 @@ class ProfileApplier:
             trust_env = tuple(var for var in MCP_TRUST_ENV if var in have)
         desired = harness_mcp_servers(info, trust_env)
         state = json.dumps(desired, sort_keys=True)
-        seen = self.cli(*exec_cmd, "cat", SAW_MCP_STATE, check=False, quiet=True)
+        # Absent on a sandbox's first apply: not an error worth logging.
+        seen = self.cli(*exec_cmd, "sh", "-c", f"cat {SAW_MCP_STATE} 2>/dev/null || true",
+                        check=False, quiet=True)
         try:
             previous = json.loads(seen.out) if seen.ok and seen.out.strip() else {}
         except ValueError:
