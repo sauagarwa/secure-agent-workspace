@@ -23,6 +23,9 @@ spec:
       # over the OpenAI protocol (NVIDIA's API is OpenAI-compatible), with
       # the model from the `inference` Secret, else this default (the RHDH
       # form pre-fills it; each sandbox has its own field).
+      env:
+        SAW_E2E_MARKER:
+          value: "1"
       inference:
         providerRef: nvidia
         model:
