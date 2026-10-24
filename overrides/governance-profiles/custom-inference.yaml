@@ -1,7 +1,8 @@
-# An OpenAI-compatible inference server of your own (vLLM, Ollama, NIM, a
-# cloud endpoint). Set `host`/`port` to the server named by the `url` in the
-# inference Secret; the credential is sent to that host only. The SAW-BOM
-# `custom-inference` profile uses this as `type: custom-inference`.
+# This deployment's copy of charts/governance-policy/profiles/examples/
+# custom-inference.yaml: an OpenAI-compatible inference server of your own.
+# `host`/`port` name the server of the `url` in the inference Secret; the
+# credential is sent to that host only. The SAW-BOM `custom-inference`
+# profile uses it (provider `custom-inference`, type `custom-inference`).
 id: custom-inference
 display_name: Custom inference endpoint
 description: OpenAI-compatible inference server named by this deployment

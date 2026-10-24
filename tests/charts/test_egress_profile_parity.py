@@ -155,3 +155,20 @@ def test_the_pattern_deploys_the_extra_profiles_directory():
     app = apps["governance-extra-profiles"]
     assert app["path"] == "overrides/governance-profiles" and app["kustomize"] is True
     assert app["namespace"] == "openshell-agents"
+
+
+EXAMPLES = PROFILES / "examples"
+
+
+def test_the_chart_example_profile_is_not_vended_but_is_what_overrides_copies():
+    example = yaml.safe_load((EXAMPLES / "custom-inference.yaml").read_text())
+    assert example["id"] == "custom-inference" and example["endpoints"][0]["host"]
+    # Not part of the shipped catalog: the template globs profiles/*.yaml only.
+    assert "examples" not in {p.parent.name for p in PROFILES.glob("*.yaml")}
+    template = (POLICY_CHART / "templates/configmap.yaml").read_text()
+    assert 'Files.Glob "profiles/*.yaml"' in template
+    # The deployment copy differs from the example only in where it points.
+    copy = yaml.safe_load((EXTRA_DIR / "custom-inference.yaml").read_text())
+    strip = lambda d: {k: v for k, v in d.items() if k != "endpoints"}
+    assert strip(copy) == strip(example)
+    assert [sorted(e) for e in copy["endpoints"]] == [sorted(e) for e in example["endpoints"]]

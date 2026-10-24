@@ -21,9 +21,11 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 
 ## Configure
 
-1. **The profile.** Edit `overrides/governance-profiles/custom-inference.yaml`
-   (shipped as an example) so `endpoints` names your server, and make sure
-   the file is listed in `overrides/governance-profiles/kustomization.yaml`:
+1. **The profile.** Copy the chart's example,
+   `charts/governance-policy/profiles/examples/custom-inference.yaml`, to
+   `overrides/governance-profiles/custom-inference.yaml` (the shipped copy
+   there is this example with a host filled in), set `endpoints` to your
+   server, and list the file in `overrides/governance-profiles/kustomization.yaml`:
 
    ```yaml
    id: custom-inference
@@ -38,7 +40,10 @@ OpenShell 0.1.x removed managed inference routing (`openshell inference`,
 
    Several hosts that share one key (a Service and its Route) go in one
    profile; a second server with its own key is a second file with its own
-   `id`, used by a provider with that `type`.
+   `id`, used by a provider with that `type` **and that name**: the
+   governance interceptor matches a sandbox's providers by profile id, so a
+   governed provider is always named after its type (the installer refuses
+   anything else).
 
 2. **Egress.** A host outside the cluster must be allowed by the VM
    firewall: `egress.extraAllow` under `defaults.openshellSaw` (or one
