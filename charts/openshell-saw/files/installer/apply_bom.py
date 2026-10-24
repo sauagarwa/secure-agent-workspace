@@ -269,10 +269,8 @@ class Shell:
         return text
 
     def run(self, cmd, env=None, check=True, ok_if_exists=False,
-            timeout=300, input_text=None, quiet=False, force=False, shown=None):
-        """shown: the argv to log instead of cmd (an argument whose value
-        must not appear in the log, however short, is replaced there)."""
-        display = self.mask(" ".join(str(c) for c in (shown or cmd)))
+            timeout=300, input_text=None, quiet=False, force=False):
+        display = self.mask(" ".join(str(c) for c in cmd))
         # force=True: still run this during --dry-run (catalog reads, and the
         # harness image pull/export needed to check it) so governance cannot
         # pass dry-run and fail apply. The image pull is the one exception to
@@ -1756,7 +1754,7 @@ ENV_VALUE_LIMIT = 8192
 #   secretKeyRef: {name: <Secret>, key: <key>}
 # with an optional default (used when the key is absent), required (defaults
 # to "no default given") and title (the RHDH form's label).
-SANDBOX_ENV_KEYS = {"value", "secretKeyRef", "default", "title"}
+SANDBOX_ENV_KEYS = {"value", "title"}
 INPUT_KEYS = {"secretKeyRef", "default", "required", "title"}
 
 
@@ -1816,44 +1814,35 @@ def sandbox_env_problems(name, src):
     elif name in set(BASE_URL_CONFIG_KEYS.values()) or name in ("MODEL", "OPENCLAW_MODEL",
                                                                "NEMOCLAW_MODEL"):
         out.append("is an inference setting; set it in the sandbox's inference: block")
-    if not isinstance(src, dict) or ("value" in src) == ("secretKeyRef" in src):
-        return out + ["needs exactly one of value or secretKeyRef"]
+    if isinstance(src, dict) and ("secretKeyRef" in src or "default" in src):
+        # A value from a Secret would travel in `sandbox create --env`'s argv
+        # and be readable by every process in the sandbox (review, P1):
+        # secrets go on a provider, whose profile the gateway injects.
+        return out + ["must be a literal ({value: ...}); a value from a Secret belongs on a "
+                      "provider, not in sandbox env (the agent and argv could read it)"]
+    if not isinstance(src, dict) or "value" not in src:
+        return out + ["needs {value: ...}"]
     unknown = sorted(set(src) - SANDBOX_ENV_KEYS)
     if unknown:
         out.append(f"has unknown keys {', '.join(unknown)}")
-    if "secretKeyRef" in src:
-        out += secret_ref_problems(src)
-    for field_name in ("value", "default"):
-        if field_name not in src:
-            continue
-        if isinstance(src[field_name], bool) or not isinstance(src[field_name], (str, int, float)):
-            out.append(f"{field_name} must be a string (quote it)")
-            continue
+    if isinstance(src["value"], bool) or not isinstance(src["value"], (str, int, float)):
+        out.append("value must be a string (quote it)")
+    else:
         try:
-            check_env_value(str(src[field_name]))
+            check_env_value(str(src["value"]))
         except ValueError as exc:
-            out.append(f"{field_name}: {exc}")
+            out.append(f"value: {exc}")
     return out
 
 
 def resolve_sandbox_env(ws, sb, secrets_dir):
-    """A sandbox's env resolved to NAME -> value: literals as given, secretKey
-    from /run/saw/secrets/<secret>/<key>, else its default."""
+    """A sandbox's env resolved to NAME -> value: literals, as given
+    (validated by sandbox_env_problems; `secretKeyRef` is not accepted
+    here, see there)."""
     out = {}
     for name in sorted(sb.env):
         src = sb.env[name]
-        if "value" in src:
-            value = str(src["value"])
-        else:
-            sname, skey = secret_ref(src)
-            value = read_secret_value(Path(secrets_dir) / sname, skey)
-            if not value:
-                if "default" not in src:
-                    raise InstallerError(
-                        f"sandbox '{sb.name}' in workspace '{ws.name}': env '{name}' not found: "
-                        f"Secret '{sname}' key '{skey}'. List the Secret in "
-                        "openshell-saw additionalProviderSecrets and make sure it exists.")
-                value = str(src["default"])
+        value = str(src["value"])
         try:
             check_env_value(value)
         except ValueError as exc:
@@ -4096,18 +4085,11 @@ class ProfileApplier:
         if sb.image:
             args += ["--from", sb.image]
         args += ws_args(ws.name)
-        # The workload's environment, for every process in the sandbox. A
-        # value read from a Secret never appears in the log of this command,
-        # whatever its length (the masker skips short values): the logged
-        # argv shows `NAME=***` for it. It is in argv for the create call
-        # itself; OpenShell has no --env NAME form that reads the environment.
-        from_secret = {name for name, src in (sb.env or {}).items()
-                       if isinstance(src, dict) and "secretKeyRef" in src}
-        for name in from_secret:
-            self.sh.add_secret(sb.env_values.get(name, ""))
-        env_start = len(args)
+        # The workload's environment, for every process in the sandbox:
+        # literals from the profile (never Secret values: `--env` puts them
+        # in argv and every sandbox process could read them; a Secret value
+        # goes on a provider).
         args += env_flags(sb.env_values)
-        env_end = len(args)
         if sandbox_mounts(ws, sb):
             args += ["--driver-config-json", sandbox_mounts_json(ws, sb)]
         for prov in sb.providers:
@@ -4117,13 +4099,7 @@ class ProfileApplier:
             args += ["--provider", prov]
         # Keep the sandbox Ready for the follow-up `sandbox exec` setup.
         args += ["--no-tty", "--detach", "--", "sh", "-c", "sleep infinity"]
-        shown = None
-        if from_secret:
-            shown = (args[:env_start]
-                     + env_flags({n: ("***" if n in from_secret else v)
-                                  for n, v in sb.env_values.items()})
-                     + args[env_end:])
-        self.cli(*args, timeout=900, shown=shown)
+        self.cli(*args, timeout=900)
         self.remember("sandbox", ws.name, sb.name)
         if pending:
             # The replacement exists now: restore into it (by its token).
@@ -4857,16 +4833,22 @@ class ProfileApplier:
         installer's mounts), checksum them in the sandbox, download the
         archive and verify it. Returns {"archive", "sha256"}; raises when
         anything fails: the caller must not delete the sandbox then."""
-        # Only the installer's own mounts are left out, each anchored to its
-        # exact path under /sandbox (`./harness`, `./.saw/trusted`, ...): a
-        # bare --exclude=harness would also drop a user's project/harness/.
-        # The archive itself (in /tmp) is outside the tree.
-        excludes = " ".join(
-            f"--anchored --exclude={shlex.quote('./' + m['target'][len('/sandbox/'):])}"
-            for m in sandbox_mounts(ws, sb) if m["target"].startswith("/sandbox/"))
-        own = f"--anchored --exclude={shlex.quote('./' + Path(self.PRESERVE_ARCHIVE).name)}"
+        # Files and symlinks only, found under /sandbox with the installer's
+        # own paths pruned: the mounts (`./harness`, `./.saw/trusted`, ...)
+        # and `./.saw` itself, each matched at its exact path (a bare
+        # `harness` would also drop a user's project/harness/). No directory
+        # entries: restoring one onto a directory the installer or a mount
+        # owns fails ("./.saw: Cannot utime", found live), and `tar -df`
+        # would then report directory mtimes that drift as soon as anything
+        # is written. Directories are recreated on extraction. The archive
+        # excludes itself.
+        pruned = {"./.saw", *("./" + m["target"][len("/sandbox/"):]
+                             for m in sandbox_mounts(ws, sb) if m["target"].startswith("/sandbox/"))}
+        prune = " ".join(f"-path {shlex.quote(p)} -prune -o" for p in sorted(pruned))
+        own = shlex.quote("./" + Path(self.PRESERVE_ARCHIVE).name)
         script = (f"cd /sandbox || exit 3; rm -f {self.PRESERVE_ARCHIVE}; "
-                  f"tar -cf {self.PRESERVE_ARCHIVE} {own} {excludes} . && "
+                  f"find . {prune} \\( -type f -o -type l \\) ! -path {own} -print0 | "
+                  f"tar -cf {self.PRESERVE_ARCHIVE} --null -T - && "
                   f"sha256sum {self.PRESERVE_ARCHIVE} | cut -d' ' -f1")
         packed = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
                           "sh", "-c", script, check=False)
@@ -4907,8 +4889,8 @@ class ProfileApplier:
         q = shlex.quote
         script = (f"[ \"$(sha256sum {self.PRESERVE_ARCHIVE} | cut -d' ' -f1)\" = "
                   f"{q(record['sha256'])} ] || exit 4; cd /sandbox || exit 3; "
-                  f"tar -xf {self.PRESERVE_ARCHIVE} && tar -df {self.PRESERVE_ARCHIVE} && "
-                  f"rm -f {self.PRESERVE_ARCHIVE}")
+                  f"tar -xf {self.PRESERVE_ARCHIVE} --no-overwrite-dir && "
+                  f"tar -df {self.PRESERVE_ARCHIVE} && rm -f {self.PRESERVE_ARCHIVE}")
         done = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
                         "sh", "-c", script, check=False)
         if not done.ok:

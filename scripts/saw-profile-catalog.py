@@ -107,8 +107,8 @@ def secret_ref(src):
 def sandbox_fields(sandbox):
     """(secret, field) for each input a sandbox reads from a Secret, as the
     installer does: its `inference:` settings (baseUrl: a URL field; model and
-    timeoutSeconds: text) and its `env:` entries. Literals are fixed by the
-    profile and not asked for."""
+    timeoutSeconds: text). `env:` entries are literals fixed by the profile
+    (a Secret value belongs on a provider) and are not asked for."""
     inference = sandbox.get("inference") or {}
     for key, kind, title in (("baseUrl", "url", "Endpoint base URL"),
                              ("model", "text", "Model"),
@@ -116,9 +116,6 @@ def sandbox_fields(sandbox):
         src = inference.get(key)
         if secret_ref(src):
             yield secret_ref(src)[0], input_field(src, kind, f"{title} ({sandbox['name']})")
-    for name, src in (sandbox.get("env") or {}).items():
-        if secret_ref(src):
-            yield secret_ref(src)[0], input_field(src, "text", str(name))
 
 
 def catalog():

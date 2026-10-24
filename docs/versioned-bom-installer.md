@@ -565,20 +565,23 @@ sandboxes:
 ```yaml
     env:
       HF_HUB_OFFLINE: {value: "1"}                                 # literal
-      PROJECT: {secretKeyRef: {name: inference, key: project}, default: ""}
+      TRANSFORMERS_CACHE: {value: /sandbox/.cache, title: HF cache}
 ```
 
 The sandbox's ordinary environment, passed as `sandbox create --env` so every
 process in the sandbox has it. Names follow OpenShell's rule
-(`[A-Za-z_][A-Za-z0-9_]*`, `OPENSHELL_*` reserved); values are one line of
-at most 8 KiB.
+(`[A-Za-z_][A-Za-z0-9_]*`, `OPENSHELL_*` reserved); values are literals,
+one line of at most 8 KiB.
 
-- **Not for credentials.** The agent can read sandbox env. A name that is a
-  provider credential variable, or any `env_vars` name of an attached
-  provider's profile (`GITHUB_TOKEN`, `GH_TOKEN`, ...), is refused -- for
-  an existing sandbox too (the check runs before anything on the gateway
-  changes). Inference settings (`*_BASE_URL`, `MODEL`) belong in
-  `inference:`.
+- **Literals only, never credentials.** `--env` puts the value in the
+  create call's argv and every process in the sandbox can read it, so a
+  `secretKeyRef` is refused here: a value from a Secret belongs on a
+  provider, whose profile the gateway injects at the proxy (the sandbox
+  only ever holds a placeholder). A name that is a provider credential
+  variable, or any `env_vars` name of an attached provider's profile
+  (`GITHUB_TOKEN`, `GH_TOKEN`, ...), is refused too -- for an existing
+  sandbox as well (the check runs before anything on the gateway changes).
+  Inference settings (`*_BASE_URL`, `MODEL`) belong in `inference:`.
 - **Changing the env recreates the sandbox.** OpenShell fixes a sandbox's
   environment at `sandbox create` (no update; `exec --env` is per command),
   so the installer keeps the env's digest in the sandbox's
