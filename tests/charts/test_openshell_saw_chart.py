@@ -1021,7 +1021,8 @@ def test_installer_disk_ships_provider_profiles(default_docs, ab, tmp_path):
     assert data["provider-profile-brave.yaml"] == (SAW_PROFILES / "brave.yaml").read_text()
     for key, value in data.items():
         (tmp_path / key).write_text(value)
-    assert set(ab.provider_profiles(tmp_path)) == {"anthropic", "brave", "gmail", "nvidia", "openai", "slack"}
+    shipped = {p.stem for p in (ROOT / "charts/governance-policy/profiles").glob("*.yaml")}
+    assert set(ab.provider_profiles(tmp_path)) == shipped
 
 
 def test_create_script_passes_the_keycloak_it_finds():
