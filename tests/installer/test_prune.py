@@ -210,11 +210,11 @@ def test_skipped_provider_is_not_pruned_on_a_transient_catalog_gap(
     ledger = tmp_path / "managed.json"
     _apply_on(ab, config, creds, custom_inference_profiles, ledger)   # adopt, provider created
     _apply_on(ab, config, creds, custom_inference_profiles, ledger)
-    assert "default/custom" in fake_env.openshell_state()["providers"]
+    assert "default/custom-inference" in fake_env.openshell_state()["providers"]
     fake_env.without_profiles("openai")        # governance briefly not serving the profile
     _apply_on(ab, config, creds, custom_inference_profiles, ledger)
     state = fake_env.openshell_state()
-    assert "default/custom" in state["providers"]
+    assert "default/custom-inference" in state["providers"]
 
 
 def test_kept_sandbox_does_not_lose_its_providers(ab, fake_env, config, shipped_profile_files,

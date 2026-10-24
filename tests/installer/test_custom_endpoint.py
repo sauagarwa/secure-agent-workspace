@@ -56,13 +56,13 @@ def test_profile_is_valid_and_reads_url_and_model_from_the_secret(ab, profiles, 
     with pytest.raises(ab.InstallerError, match="unsupported type 'custom-inference'"):
         ab.validate_profiles(profiles)
     creds = ab.resolve_credentials(profiles, custom_secrets)
-    custom = next(p for p in profiles[0].workspaces[0].providers if p.name == "custom")
+    custom = next(p for p in profiles[0].workspaces[0].providers if p.name == "custom-inference")
     # The provider is only the credential...
     assert (custom.type, custom.base_url, custom.model) == ("custom-inference", "", "")
-    assert creds["default"]["custom"] == "sk-CUSTOM-TEST-KEY"
+    assert creds["default"]["custom-inference"] == "sk-CUSTOM-TEST-KEY"
     # ...the endpoint and model are the sandbox's (the URL normalised).
     sb = notebook(profiles)
-    assert sb.inference_values == {"providerRef": "custom", "protocol": "openai",
+    assert sb.inference_values == {"providerRef": "custom-inference", "protocol": "openai",
                                    "baseUrl": URL, "model": MODEL, "timeoutSeconds": 300}
     assert (ab.sandbox_endpoint(sb, custom), ab.sandbox_model(sb, custom)) == (URL, MODEL)
 
@@ -74,7 +74,7 @@ def test_apply_creates_the_provider_from_the_governed_profile_and_onboards_on_it
     state = fake_env.openshell_state()
     # The credential env var is the governed profile's, not a built-in one;
     # no provider --config (not part of OpenShell 0.1.2's provider CLI).
-    assert state["providers"]["default/custom"] == {
+    assert state["providers"]["default/custom-inference"] == {
         "type": "custom-inference", "credential": "CUSTOM_INFERENCE_API_KEY=sk-CUSTOM-TEST-KEY"}
     assert "env" not in state["sandboxes"]["default/notebook"]     # inference is not env
     # The shipped profile's timeoutSeconds: 300 reaches OpenClaw's provider config.
@@ -195,7 +195,7 @@ def test_the_profile_arriving_later_makes_the_next_apply_succeed(
                           "custom-inference": yaml.safe_load(EXTRA_PROFILE.read_text())})
     applier = ab.ProfileApplier(ab.Shell(), config, creds)
     applier.apply(profiles)
-    assert fake_env.openshell_state()["sandboxes"]["default/notebook"]["providers"] == ["custom"]
+    assert fake_env.openshell_state()["sandboxes"]["default/notebook"]["providers"] == ["custom-inference"]
     assert applier.verify(profiles) == []
 
 
@@ -236,3 +236,22 @@ def test_a_replaced_openclaw_credential_is_activated(ab, fake_env, config, profi
 ])
 def test_replacement_parsing_is_strict(ab, output):
     assert ab.openclaw_replacement_profile(output) is None
+
+
+def test_under_governance_a_provider_is_named_after_its_type(ab):
+    """Found live: the governance interceptor compares a new sandbox's
+    provider *names* with the vended profile ids, so `name: custom` with
+    `type: custom-inference` is refused at sandbox create ("sandbox providers
+    may only use vended provider profiles") while `brave`/`brave` passes."""
+    files = profile_files("custom-inference")
+    key = next(k for k in files if k.endswith("providers.yaml"))
+    files[key] = files[key].replace("- name: custom-inference", "- name: custom", 1)
+    sb_key = next(k for k in files if k.endswith("sandbox.yaml"))
+    files[sb_key] = files[sb_key].replace("- custom-inference", "- custom").replace(
+        "providerRef: custom-inference", "providerRef: custom")
+    profiles = ab.parse_profiles(files)
+    with pytest.raises(ab.InstallerError, match="must be named after its type 'custom-inference'"):
+        ab.validate_profiles(profiles, governed=True)
+    # Shipped profiles all satisfy it.
+    for name in ("custom-inference", "data-science"):
+        ab.validate_profiles(ab.parse_profiles(profile_files(name)), governed=True)

@@ -1557,6 +1557,17 @@ def validate_profiles(profiles, known_profiles=(), governed=False):
                         or p.base_url or p.inference_timeout):
                     errors.append(f"{where}: keyless provider '{p.name}' cannot be combined "
                                   "with model/inference settings")
+            if governed and p.name != p.type:
+                # OpenShell 0.1.2's governance interceptor validates a new
+                # sandbox's providers by comparing each provider *name* with
+                # the vended profile ids (examples/governance-interceptor,
+                # providers_are_managed): a provider named differently from
+                # its type is refused at sandbox create with "sandbox
+                # providers may only use vended provider profiles". Found
+                # live; refuse it here, with the reason, instead.
+                errors.append(f"{where}: provider '{p.name}' must be named after its type "
+                              f"'{p.type}' (the governance interceptor checks sandbox providers "
+                              "by profile id, so name and type must match)")
             if (not p.credential_free and p.type not in PROVIDER_CRED_MAP
                     and p.type not in known_profiles):
                 if not governed:
