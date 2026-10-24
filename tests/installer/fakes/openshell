@@ -334,7 +334,14 @@ elif op == "sandbox upload":
     sb = state["sandboxes"].get(key)
     if not sb:
         fail(f"Error: sandbox '{head[2]}' not found")
-    local, remote = head[3], head[4]
+    # Like the gateway (0.1.2): uploads are filtered by .gitignore rules
+    # unless --no-git-ignore is given, and a filtered-out file stops the
+    # upload ("upload stopped. Use --no-git-ignore ..."). An archive the
+    # installer wrote is always filtered here, as it was live.
+    if "--no-git-ignore" not in args:
+        fail(f"Error: .gitignore filtering excluded {head[-2]}; upload stopped.\n"
+             "Use --no-git-ignore to upload intentionally without filtering")
+    local, remote = head[-2], head[-1]
     if not remote.startswith("/sandbox/"):
         fail(f"Error: upload destination {remote!r} escapes the sandbox working directory")
     sb.setdefault("archives", {})[remote] = json.loads(Path(local).read_text())

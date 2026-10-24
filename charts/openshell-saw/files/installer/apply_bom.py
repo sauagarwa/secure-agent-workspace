@@ -269,8 +269,10 @@ class Shell:
         return text
 
     def run(self, cmd, env=None, check=True, ok_if_exists=False,
-            timeout=300, input_text=None, quiet=False, force=False):
-        display = self.mask(" ".join(str(c) for c in cmd))
+            timeout=300, input_text=None, quiet=False, force=False, shown=None):
+        """shown: the argv to log instead of cmd (an argument whose value
+        must not appear in the log, however short, is replaced there)."""
+        display = self.mask(" ".join(str(c) for c in (shown or cmd)))
         # force=True: still run this during --dry-run (catalog reads, and the
         # harness image pull/export needed to check it) so governance cannot
         # pass dry-run and fail apply. The image pull is the one exception to
@@ -4095,13 +4097,17 @@ class ProfileApplier:
             args += ["--from", sb.image]
         args += ws_args(ws.name)
         # The workload's environment, for every process in the sandbox. A
-        # value read from a Secret is masked in the log of this command (it
-        # is in argv for the create call itself; OpenShell has no --env NAME
-        # form that reads the environment).
-        for name, src in (sb.env or {}).items():
-            if isinstance(src, dict) and "secretKeyRef" in src and sb.env_values.get(name):
-                self.sh.add_secret(sb.env_values[name])
+        # value read from a Secret never appears in the log of this command,
+        # whatever its length (the masker skips short values): the logged
+        # argv shows `NAME=***` for it. It is in argv for the create call
+        # itself; OpenShell has no --env NAME form that reads the environment.
+        from_secret = {name for name, src in (sb.env or {}).items()
+                       if isinstance(src, dict) and "secretKeyRef" in src}
+        for name in from_secret:
+            self.sh.add_secret(sb.env_values.get(name, ""))
+        env_start = len(args)
         args += env_flags(sb.env_values)
+        env_end = len(args)
         if sandbox_mounts(ws, sb):
             args += ["--driver-config-json", sandbox_mounts_json(ws, sb)]
         for prov in sb.providers:
@@ -4111,7 +4117,13 @@ class ProfileApplier:
             args += ["--provider", prov]
         # Keep the sandbox Ready for the follow-up `sandbox exec` setup.
         args += ["--no-tty", "--detach", "--", "sh", "-c", "sleep infinity"]
-        self.cli(*args, timeout=900)
+        shown = None
+        if from_secret:
+            shown = (args[:env_start]
+                     + env_flags({n: ("***" if n in from_secret else v)
+                                  for n, v in sb.env_values.items()})
+                     + args[env_end:])
+        self.cli(*args, timeout=900, shown=shown)
         self.remember("sandbox", ws.name, sb.name)
         if pending:
             # The replacement exists now: restore into it (by its token).
@@ -4689,6 +4701,11 @@ class ProfileApplier:
         if not any(True for _ in enabled_workspaces(profiles)):
             raise InstallerError(
                 "profile ConfigMap is missing or empty; refusing to change the gateway")
+        # The local mTLS gateway entry first: everything below, the catalog
+        # read included, must talk to this VM's gateway (found in review: a
+        # fresh VM has no selected gateway, a reused one may select another).
+        # register_gateway only writes the CLI's local gateway entry.
+        self.register_gateway()
         # Governance-only provider types are resolved before preflight, so
         # the credential checks there see those profiles too (found in
         # review: preflight ran first and called their credentials "none
@@ -4698,7 +4715,6 @@ class ProfileApplier:
         for _, ws in enabled_workspaces(profiles):
             self.adopt_governed_profiles(ws, catalog_ws=default_ws)
         self.preflight(profiles)
-        self.register_gateway()
         self.reconcile_owner_memberships()
         for profile, ws in enabled_workspaces(profiles):
             self.profile_name = profile.name
@@ -4880,8 +4896,11 @@ class ProfileApplier:
         local = Path(record["archive"])
         if not self.sh.dry_run and not local.is_file():
             raise InstallerError(f"the archive to restore into '{sb.name}' is missing: {local}")
-        put = self.cli("sandbox", "upload", sb.name, *ws_args(ws.name), str(local),
-                       self.PRESERVE_ARCHIVE, check=False)
+        # --no-git-ignore: `sandbox upload` filters by .gitignore rules by
+        # default and stops when the file is filtered (found live: the
+        # archive was refused and the restore never ran).
+        put = self.cli("sandbox", "upload", sb.name, *ws_args(ws.name), "--no-git-ignore",
+                       str(local), self.PRESERVE_ARCHIVE, check=False)
         if not put.ok:
             raise InstallerError(f"could not upload the archive into '{sb.name}'; the restore "
                                  "is retried on the next apply")

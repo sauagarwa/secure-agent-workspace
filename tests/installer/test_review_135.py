@@ -55,11 +55,13 @@ def test_an_existing_sandbox_is_held_to_the_env_rules_too(ab, fake_env, config, 
     before = len(fake_env.openshell_calls())
     with pytest.raises(ab.InstallerError, match="credential variable of provider 'gh'"):
         ab.ProfileApplier(ab.Shell(), config, creds, provider_profile_docs=docs).apply(profiles)
-    # Refused before anything touched the gateway.
-    assert fake_env.openshell_calls()[before:] == []
+    # Refused before anything on the gateway changed: only the local gateway
+    # entry (CLI configuration) and a read came first.
+    later = [" ".join(c[:2]) for c in fake_env.openshell_calls()[before:]]
+    assert set(later) <= {"gateway remove", "gateway add", "gateway select", "workspace list"}, later
 
 
-def test_a_named_credential_must_exist_in_the_profile(ab, config, tmp_path):
+def test_a_named_credential_must_exist_in_the_profile(ab, fake_env, config, tmp_path):
     github = ab.Provider(name="gh", type="github", credential_secret="gh",
                          credentials_spec={"token": {"secretKey": "token"}})   # profile: api_token
     profiles = _profiles(ab, ab.Sandbox(name="tools", type="generic", providers=["gh"]), github)
@@ -69,6 +71,10 @@ def test_a_named_credential_must_exist_in_the_profile(ab, config, tmp_path):
                                                 "profile declares \\(api_token\\)"):
         ab.ProfileApplier(ab.Shell(), config, creds,
                           provider_profile_docs={"github": GH_PROFILE}).apply(profiles)
+    # Refused before anything on the gateway changed (the local gateway
+    # entry is registered first; that is CLI configuration, not the gateway).
+    calls = [" ".join(c[:2]) for c in fake_env.openshell_calls()]
+    assert not any(c in ("workspace create", "provider create", "sandbox create") for c in calls)
 
 
 # --- 2. env updates recreate the sandbox, keeping /sandbox -----------------------------
@@ -775,15 +781,34 @@ def test_a_secret_sourced_env_value_is_masked_in_the_log(ab, fake_env, config, t
     """Found in review: the resolved value went into `--env NAME=VALUE` and
     the full `sandbox create` command was logged."""
     _, sandbox, profiles = _env_sandbox(ab, {"HF_TOKEN": {"secretKeyRef": {"name": "hf", "key": "token"}},
+                                            "PIN": {"secretKeyRef": {"name": "hf", "key": "pin"}},
                                             "PLAIN": {"value": "visible"}})
     _secret(tmp_path, "inference", api_key="k")
-    _secret(tmp_path, "hf", token="hf-SECRET-VALUE-1234")
+    _secret(tmp_path, "hf", token="hf-SECRET-VALUE-1234", pin="abc")   # short: the masker skips it
     _apply(ab, config, tmp_path, profiles)
     out = capsys.readouterr().out
-    assert "hf-SECRET-VALUE-1234" not in out
-    assert "--env HF_TOKEN=***" in out and "--env PLAIN=visible" in out
-    # The sandbox itself got the real value.
-    assert "HF_TOKEN=hf-SECRET-VALUE-1234" in fake_env.openshell_state()["sandboxes"]["default/chat"]["env"]
+    assert "hf-SECRET-VALUE-1234" not in out and "PIN=abc" not in out
+    assert "--env HF_TOKEN=***" in out and "--env PIN=***" in out and "--env PLAIN=visible" in out
+    # The sandbox itself got the real values.
+    env = fake_env.openshell_state()["sandboxes"]["default/chat"]["env"]
+    assert "HF_TOKEN=hf-SECRET-VALUE-1234" in env and "PIN=abc" in env
+
+
+def test_the_local_gateway_is_selected_before_the_catalog_is_read(ab, fake_env, config, tmp_path):
+    """Found in review: adopt_governed_profiles read the catalog before
+    register_gateway, i.e. through whichever gateway the CLI had selected."""
+    record = {"id": "vllm-prod", "category": "inference",
+              "credentials": [{"name": "api_key", "env_vars": ["VLLM_API_KEY"]}],
+              "endpoints": [{"host": "vllm.models.svc", "port": 8000}]}
+    fake_env.set_catalog({"brave": ["api.search.brave.com"], "vllm-prod": record})
+    provider = ab.Provider(name="vllm-prod", type="vllm-prod", credential_secret="inference")
+    sandbox = ab.Sandbox(name="chat", type="openclaw", providers=["vllm-prod"],
+                         inference={"providerRef": "vllm-prod", "protocol": "openai", "model": "m"})
+    profiles = _profiles(ab, sandbox, provider)
+    _secret(tmp_path, "inference", api_key="k")
+    _apply(ab, config, tmp_path, profiles)
+    calls = [" ".join(c[:3]) for c in fake_env.openshell_calls()]
+    assert calls.index("gateway select " + config["mtlsGateway"]) < calls.index("provider list-profiles -o")
 
 
 def test_preflight_sees_governed_profiles(ab, fake_env, config, tmp_path):
