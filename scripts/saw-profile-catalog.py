@@ -15,6 +15,14 @@ Helm chart can only read its own files:
   charts/openshell-rhdh/files/delete-workspace.yaml the delete template (the
                                                    same pipeline steps)
 
+It also mirrors the governance provider profiles into the installer:
+
+  charts/openshell-saw/files/provider-profiles/*.yaml  exact copies of
+                                                   charts/governance-policy/profiles/*.yaml
+                                                   (the catalog the gateway
+                                                   gets when governance is off;
+                                                   a file no longer shipped is removed)
+
     scripts/saw-profile-catalog.py            write both files
     scripts/saw-profile-catalog.py --check    fail when they are stale (CI)
     scripts/saw-profile-catalog.py --list     print the files it writes
@@ -32,6 +40,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = ROOT / "charts" / "saw-bom" / "profiles"
+GOVERNANCE_PROFILES = ROOT / "charts" / "governance-policy" / "profiles"
+INSTALLER_PROFILES = ROOT / "charts" / "openshell-saw" / "files" / "provider-profiles"
 CATALOG_OUTPUTS = [ROOT / "charts" / "saw-users" / "files" / "profile-catalog.json",
                    ROOT / "charts" / "openshell-rhdh" / "files" / "profile-catalog.json"]
 TEMPLATE_OUTPUT = ROOT / "charts" / "openshell-rhdh" / "files" / "create-workspace.yaml"
@@ -439,9 +449,14 @@ def main(argv=None):
     parser.add_argument("--list", action="store_true",
                         help="print the files this script writes, one per line, and exit")
     args = parser.parse_args(argv)
+    # The installer's provider-profile mirror: every shipped governance
+    # profile (profiles/*.yaml, not the examples/ templates), byte for byte.
+    mirror = {INSTALLER_PROFILES / src.name: src.read_text(encoding="utf-8")
+              for src in sorted(GOVERNANCE_PROFILES.glob("*.yaml"))}
+    extra = [p for p in sorted(INSTALLER_PROFILES.glob("*.yaml")) if p not in mirror]
     if args.list:
         for path in (*CATALOG_OUTPUTS, TEMPLATE_OUTPUT, DELETE_TEMPLATE,
-                     ADMIN_TEMPLATE_OUTPUT, ADMIN_DELETE_TEMPLATE):
+                     ADMIN_TEMPLATE_OUTPUT, ADMIN_DELETE_TEMPLATE, *mirror):
             print(path.relative_to(ROOT))
         return 0
     text = render()
@@ -450,7 +465,14 @@ def main(argv=None):
     outputs.append((DELETE_TEMPLATE, render_delete_template()))
     outputs.append((ADMIN_TEMPLATE_OUTPUT, render_template(json.loads(text), for_user=True)))
     outputs.append((ADMIN_DELETE_TEMPLATE, render_delete_template(for_user=True)))
+    outputs += sorted(mirror.items())
     stale = []
+    for path in extra:
+        if args.check:
+            stale.append(f"{path.relative_to(ROOT)} (no longer a governance profile)")
+        else:
+            path.unlink()
+            print(f"removed {path.relative_to(ROOT)}")
     for path, text in outputs:
         current = path.read_text(encoding="utf-8") if path.exists() else ""
         if current == text:

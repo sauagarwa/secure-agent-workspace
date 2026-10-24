@@ -322,6 +322,10 @@ elif op == "sandbox download":
     if not sb:
         fail(f"Error: sandbox '{head[2]}' not found")
     remote, local = head[3], head[4]
+    # Like the gateway (0.1.2): only paths inside the working directory
+    # (/sandbox) are served; anything else is refused before any transfer.
+    if not remote.startswith("/sandbox/"):
+        fail(f"Error: download source {remote!r} escapes the sandbox working directory")
     if remote not in sb.get("archives", {}):
         fail(f"Error: {remote}: no such file")
     Path(local).write_text(json.dumps(sb["archives"][remote]))
@@ -331,6 +335,8 @@ elif op == "sandbox upload":
     if not sb:
         fail(f"Error: sandbox '{head[2]}' not found")
     local, remote = head[3], head[4]
+    if not remote.startswith("/sandbox/"):
+        fail(f"Error: upload destination {remote!r} escapes the sandbox working directory")
     sb.setdefault("archives", {})[remote] = json.loads(Path(local).read_text())
 elif op == "sandbox delete":
     key = f"{ws}/{head[2]}"

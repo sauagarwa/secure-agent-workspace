@@ -24,6 +24,8 @@ on:
   pull_request:
     paths:
       - "charts/saw-bom/profiles/**"
+      - "charts/governance-policy/profiles/**"
+      - "charts/openshell-saw/files/provider-profiles/**"
       - "scripts/saw-profile-catalog.py"
       - "charts/saw-users/files/profile-catalog.json"
       - "charts/openshell-rhdh/files/profile-catalog.json"

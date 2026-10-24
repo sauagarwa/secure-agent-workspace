@@ -262,15 +262,21 @@ def test_the_backup_excludes_only_the_installers_mounts(ab, tmp_path):
                 "project/harness/test.py", "project/.saw/notes.md", "notes.md"):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(rel)
-    archive = tmp_path / "preserve.tar"
+    # The archive lives inside /sandbox (download/upload only serve the
+    # working directory -- found live) and must not contain itself; a
+    # leftover from an interrupted run is replaced, not nested.
+    archive = root / ".saw-preserve.tar"
+    (root / ".saw-preserve.tar").write_text("stale")
+    assert ab.ProfileApplier.PRESERVE_ARCHIVE == "/sandbox/.saw-preserve.tar"
     run = script.replace("cd /sandbox", f"cd {root}").replace(
-        "/tmp/saw-sandbox-preserve.tar", str(archive))
+        "/sandbox/.saw-preserve.tar", str(archive))
     subprocess.run(["sh", "-c", run], check=True, capture_output=True)
     names = subprocess.run(["tar", "-tf", str(archive)], check=True, capture_output=True,
                            text=True).stdout.split()
     kept = {n.lstrip("./") for n in names if not n.endswith("/")}
     assert "project/harness/test.py" in kept and "project/.saw/notes.md" in kept
     assert "notes.md" in kept
+    assert ".saw-preserve.tar" not in kept
     assert not any(n.startswith(("harness/", ".saw/trusted", ".saw/audit")) for n in kept)
 
 
@@ -738,3 +744,72 @@ def test_the_shipped_form_fields_match_the_profiles():
     assert {"model", "cuda_model"} <= set(ds)
     assert ds["model"]["title"] != ds["cuda_model"]["title"]
     assert not ds["model"]["required"] and ds["model"]["default"].startswith("nvidia/")
+
+
+def test_the_preserve_archive_is_inside_the_sandbox_working_directory(ab, fake_env, config, tmp_path):
+    """Found live: `openshell sandbox download` refuses a source outside
+    the sandbox's working directory (/tmp/... was refused before any data
+    moved), so an env change could never carry /sandbox over. The fake now
+    enforces the same rule; the archive and its checksum file live under
+    /sandbox and the archive excludes itself (see the real-tar test)."""
+    assert ab.ProfileApplier.PRESERVE_ARCHIVE.startswith("/sandbox/")
+    assert ab.ProfileApplier.PRESERVE_SUM.startswith("/sandbox/")
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    _apply(ab, config, tmp_path, profiles)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "x"}
+    fake_env.set_openshell_state(state)
+    sandbox.env = {"A": {"value": "2"}}
+    _apply(ab, config, tmp_path, profiles)
+    after = fake_env.openshell_state()["sandboxes"]["default/chat"]
+    assert after["files"].get("notes.md") == "x" and after["env"] == ["A=2"]
+    calls = [" ".join(c) for c in fake_env.openshell_calls()]
+    assert any("sandbox download chat /sandbox/.saw-preserve.tar" in c for c in calls)
+    assert any("sandbox upload chat " in c and c.endswith("/sandbox/.saw-preserve.tar") for c in calls)
+
+
+# --- review round 8: Secret-sourced env masked; governed profiles seen by preflight ---------
+
+def test_a_secret_sourced_env_value_is_masked_in_the_log(ab, fake_env, config, tmp_path, capsys):
+    """Found in review: the resolved value went into `--env NAME=VALUE` and
+    the full `sandbox create` command was logged."""
+    _, sandbox, profiles = _env_sandbox(ab, {"HF_TOKEN": {"secretKeyRef": {"name": "hf", "key": "token"}},
+                                            "PLAIN": {"value": "visible"}})
+    _secret(tmp_path, "inference", api_key="k")
+    _secret(tmp_path, "hf", token="hf-SECRET-VALUE-1234")
+    _apply(ab, config, tmp_path, profiles)
+    out = capsys.readouterr().out
+    assert "hf-SECRET-VALUE-1234" not in out
+    assert "--env HF_TOKEN=***" in out and "--env PLAIN=visible" in out
+    # The sandbox itself got the real value.
+    assert "HF_TOKEN=hf-SECRET-VALUE-1234" in fake_env.openshell_state()["sandboxes"]["default/chat"]["env"]
+
+
+def test_preflight_sees_governed_profiles(ab, fake_env, config, tmp_path):
+    """Found in review: preflight ran before adopt_governed_profiles, so a
+    governance-only profile's named credentials were "none shipped" and its
+    credential variable was not checked against the sandbox env."""
+    record = {"id": "vllm-prod", "category": "inference", "inference_capable": True,
+              "credentials": [{"name": "api_key", "env_vars": ["VLLM_API_KEY"]}],
+              "endpoints": [{"host": "vllm.models.svc", "port": 8000}]}
+    fake_env.set_catalog({"brave": ["api.search.brave.com"], "vllm-prod": record})
+    provider = ab.Provider(name="vllm-prod", type="vllm-prod", credential_secret="inference",
+                           credentials_spec={"api_key": {"secretKey": "api_key"}})
+    sandbox = ab.Sandbox(name="chat", type="openclaw", providers=["vllm-prod"],
+                         inference={"providerRef": "vllm-prod", "protocol": "openai", "model": "m"},
+                         env={"VLLM_API_KEY": {"value": "shadow"}})
+    profiles = _profiles(ab, sandbox, provider)
+    _secret(tmp_path, "inference", api_key="k")
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    # The named credential is accepted (the governed profile declares it) and
+    # the env collision is the error, before anything is created.
+    before = len([c for c in fake_env.openshell_calls() if c[:2] in (["provider", "create"], ["sandbox", "create"])])
+    with pytest.raises(ab.InstallerError, match="credential variable of provider 'vllm-prod'"):
+        ab.ProfileApplier(ab.Shell(), config, creds).apply(profiles)
+    calls = [c for c in fake_env.openshell_calls() if c[:2] in (["provider", "create"], ["sandbox", "create"])]
+    assert len(calls) == before
+    sandbox.env = {}
+    creds = ab.resolve_credentials(profiles, tmp_path)
+    ab.ProfileApplier(ab.Shell(), config, creds).apply(profiles)
+    assert fake_env.openshell_state()["providers"]["default/vllm-prod"]["credential"] == "VLLM_API_KEY=k"

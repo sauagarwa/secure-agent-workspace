@@ -27,7 +27,12 @@ def outputs():
 
 def test_list_names_every_generated_file():
     listed = outputs()
-    assert len(listed) == 6
+    # The six catalog/form files, plus the installer's mirror of every
+    # shipped governance profile.
+    mirrored = [p for p in listed if p.startswith("charts/openshell-saw/files/provider-profiles/")]
+    shipped = sorted(p.name for p in (ROOT / "charts/governance-policy/profiles").glob("*.yaml"))
+    assert len(listed) == 6 + len(shipped)
+    assert sorted(p.rsplit("/", 1)[1] for p in mirrored) == shipped
     assert "charts/openshell-rhdh/files/create-workspace.yaml" in listed
     assert "charts/saw-users/files/profile-catalog.json" in listed
     assert all((ROOT / p).is_file() for p in listed)
@@ -42,6 +47,8 @@ def scratch(tmp_path):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, repo / rel)
     shutil.copytree(ROOT / "charts" / "saw-bom" / "profiles", repo / "charts" / "saw-bom" / "profiles")
+    shutil.copytree(ROOT / "charts" / "governance-policy" / "profiles",
+                    repo / "charts" / "governance-policy" / "profiles")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name in ("python", "python3"):

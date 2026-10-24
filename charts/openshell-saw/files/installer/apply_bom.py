@@ -3367,7 +3367,7 @@ class ProfileApplier:
         if errors:
             raise InstallerError("invalid profiles:\n  - " + "\n  - ".join(errors))
 
-    def adopt_governed_profiles(self, ws):
+    def adopt_governed_profiles(self, ws, catalog_ws=None):
         """Provider types the installer neither knows built-in nor ships must
         be profiles the gateway's governance catalog serves (a deployment's
         own, from overrides/governance-profiles). Their catalog records become
@@ -3375,13 +3375,18 @@ class ProfileApplier:
         from the governed profile exactly as from a shipped one. A type the
         catalog does not serve is an error here, before anything is created:
         skipping it would leave a sandbox whose `inference.providerRef` names
-        a provider that does not exist."""
+        a provider that does not exist.
+
+        catalog_ws: the workspace whose catalog to read (the interceptor's
+        catalog is gateway-wide; before the workspaces exist, preflight reads
+        it through the default workspace)."""
+        catalog_ws = catalog_ws or ws
         for prov in ws.providers:
             if (not prov.enabled or prov.credential_free or prov.type in PROVIDER_CRED_MAP
                     or prov.type in self.provider_profiles):
                 continue
-            self.governance_catalog(ws)
-            record = (self.catalog_details.get(ws.name) or {}).get(prov.type)
+            self.governance_catalog(catalog_ws)
+            record = (self.catalog_details.get(catalog_ws.name) or {}).get(prov.type)
             if not record:
                 raise InstallerError(
                     f"provider '{prov.name}' in workspace '{ws.name}' has type '{prov.type}', "
@@ -4089,7 +4094,13 @@ class ProfileApplier:
         if sb.image:
             args += ["--from", sb.image]
         args += ws_args(ws.name)
-        # The workload's environment, for every process in the sandbox.
+        # The workload's environment, for every process in the sandbox. A
+        # value read from a Secret is masked in the log of this command (it
+        # is in argv for the create call itself; OpenShell has no --env NAME
+        # form that reads the environment).
+        for name, src in (sb.env or {}).items():
+            if isinstance(src, dict) and "secretKeyRef" in src and sb.env_values.get(name):
+                self.sh.add_secret(sb.env_values[name])
         args += env_flags(sb.env_values)
         if sandbox_mounts(ws, sb):
             args += ["--driver-config-json", sandbox_mounts_json(ws, sb)]
@@ -4678,6 +4689,14 @@ class ProfileApplier:
         if not any(True for _ in enabled_workspaces(profiles)):
             raise InstallerError(
                 "profile ConfigMap is missing or empty; refusing to change the gateway")
+        # Governance-only provider types are resolved before preflight, so
+        # the credential checks there see those profiles too (found in
+        # review: preflight ran first and called their credentials "none
+        # shipped"). The catalog is gateway-wide; read through the default
+        # workspace, which exists before any profile workspace does.
+        default_ws = Workspace(name="default")
+        for _, ws in enabled_workspaces(profiles):
+            self.adopt_governed_profiles(ws, catalog_ws=default_ws)
         self.preflight(profiles)
         self.register_gateway()
         self.reconcile_owner_memberships()
@@ -4798,8 +4817,11 @@ class ProfileApplier:
     # verified, so an interrupted or failed restore is finished on a later
     # apply and the old sandbox is only ever deleted once its files are
     # safely out.
-    PRESERVE_ARCHIVE = "/tmp/saw-sandbox-preserve.tar"
-    PRESERVE_SUM = "/tmp/saw-sandbox-preserve.sha256"
+    # Inside /sandbox: `sandbox download`/`upload` only serve paths within the
+    # sandbox's working directory (a path outside it, /tmp say, is refused
+    # before any data moves -- found live). The archive excludes itself.
+    PRESERVE_ARCHIVE = "/sandbox/.saw-preserve.tar"
+    PRESERVE_SUM = "/sandbox/.saw-preserve.sha256"
 
     def migration_key(self, ws, sb):
         return f"{ws.name}/{sb.name}"
@@ -4826,7 +4848,9 @@ class ProfileApplier:
         excludes = " ".join(
             f"--anchored --exclude={shlex.quote('./' + m['target'][len('/sandbox/'):])}"
             for m in sandbox_mounts(ws, sb) if m["target"].startswith("/sandbox/"))
-        script = (f"cd /sandbox || exit 3; tar -cf {self.PRESERVE_ARCHIVE} {excludes} . && "
+        own = f"--anchored --exclude={shlex.quote('./' + Path(self.PRESERVE_ARCHIVE).name)}"
+        script = (f"cd /sandbox || exit 3; rm -f {self.PRESERVE_ARCHIVE}; "
+                  f"tar -cf {self.PRESERVE_ARCHIVE} {own} {excludes} . && "
                   f"sha256sum {self.PRESERVE_ARCHIVE} | cut -d' ' -f1")
         packed = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
                           "sh", "-c", script, check=False)
