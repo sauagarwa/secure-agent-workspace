@@ -56,14 +56,16 @@ def load(path):
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
-def input_field(src, kind, fallback_title):
+def input_field(src, kind, fallback_title, nonempty=False):
     """A form field for a typed input ({secretKeyRef: {name, key}, default?,
     required?, title?}), as the installer resolves it (resolve_input): the
     field is required when it has no default, unless `required` says
-    otherwise; a default is kept even when empty, so the form and the
-    installer agree on what an absent value means."""
+    otherwise. A nonempty field such as inference.model is also required
+    when its default is empty, since the installer rejects that result."""
+    required = (bool(src.get("required")) or not bool(src.get("default")) if nonempty
+                else bool(src.get("required", "default" not in src)))
     field = {"key": src["secretKeyRef"]["key"], "kind": kind,
-             "required": bool(src.get("required", "default" not in src)),
+             "required": required,
              "title": src.get("title") or fallback_title}
     if "default" in src and src["default"] is not None:
         field["default"] = str(src["default"])
@@ -115,7 +117,22 @@ def sandbox_fields(sandbox):
                              ("timeoutSeconds", "text", "Request timeout (seconds)")):
         src = inference.get(key)
         if secret_ref(src):
-            yield secret_ref(src)[0], input_field(src, kind, f"{title} ({sandbox['name']})")
+            yield secret_ref(src)[0], input_field(
+                src, kind, f"{title} ({sandbox['name']})", nonempty=key == "model")
+
+
+def validate_catalog_inputs(wdir, sandboxes, providers):
+    """Report profile mistakes before rendering fields that assume valid names and keys."""
+    for sb in sandboxes:
+        if not isinstance(sb, dict) or not sb.get("name"):
+            raise ValueError(f"{wdir / 'sandbox.yaml'}: sandbox needs a name")
+    for provider in providers:
+        credentials = provider.get("credentials") or {}
+        if not isinstance(credentials, dict):
+            raise ValueError(f"{wdir / 'providers.yaml'}: provider credentials must be a mapping")
+        for cname, entry in credentials.items():
+            if not isinstance(entry, dict) or not entry.get("secretKey"):
+                raise ValueError(f"{wdir / 'providers.yaml'}: credential '{cname}' needs a secretKey")
 
 
 def catalog():
@@ -132,8 +149,11 @@ def catalog():
             if description:
                 descriptions.append(description)
             enabled = spec.get("enabled", True)
+            sandbox_specs = (load(wdir / "sandbox.yaml").get("spec") or {}).get("sandboxes") or []
+            provider_specs = (load(wdir / "providers.yaml").get("spec") or {}).get("providers") or []
+            validate_catalog_inputs(wdir, sandbox_specs, provider_specs)
             sandboxes = []
-            for sb in (load(wdir / "sandbox.yaml").get("spec") or {}).get("sandboxes") or []:
+            for sb in sandbox_specs:
                 ui = sb.get("ui") or {}
                 sandboxes.append({"name": sb["name"], "type": sb.get("type", "generic"),
                                   "enabled": sb.get("enabled", True),
@@ -142,7 +162,7 @@ def catalog():
                                "sandboxes": sandboxes})
             if not enabled:
                 continue
-            for prov in (load(wdir / "providers.yaml").get("spec") or {}).get("providers") or []:
+            for prov in provider_specs:
                 if not prov.get("enabled", True) or not prov.get("credentialSecret"):
                     continue
                 entry = secrets.setdefault(prov["credentialSecret"],
@@ -152,7 +172,7 @@ def catalog():
                     if f["key"] not in {x["key"] for x in entry["fields"]}:
                         entry["fields"].append(f)
             # The inputs a sandbox reads from a Secret (inference, env).
-            for sb in (load(wdir / "sandbox.yaml").get("spec") or {}).get("sandboxes") or []:
+            for sb in sandbox_specs:
                 if not sb.get("enabled", True):
                     continue
                 for secret, f in sandbox_fields(sb):
@@ -459,7 +479,10 @@ def main(argv=None):
                      ADMIN_TEMPLATE_OUTPUT, ADMIN_DELETE_TEMPLATE, *mirror, INSTALLER_PROFILES):
             print(path.relative_to(ROOT))
         return 0
-    text = render()
+    try:
+        text = render()
+    except ValueError as exc:
+        parser.error(str(exc))
     outputs = [(path, text) for path in CATALOG_OUTPUTS]
     outputs.append((TEMPLATE_OUTPUT, render_template(json.loads(text))))
     outputs.append((DELETE_TEMPLATE, render_delete_template()))

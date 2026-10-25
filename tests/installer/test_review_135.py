@@ -118,6 +118,49 @@ def test_a_changed_env_recreates_the_sandbox_with_its_files(ab, fake_env, config
     assert "sandbox download" in ops and "sandbox upload" in ops
 
 
+def test_a_mount_change_recreates_the_sandbox_with_its_files(
+        ab, fake_env, config, tmp_path, monkeypatch):
+    _, sandbox, profiles = _env_sandbox(ab, {})
+    _secret(tmp_path, "inference", api_key="k")
+    _apply(ab, config, tmp_path, profiles)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "keep me"}
+    fake_env.set_openshell_state(state)
+    monkeypatch.setattr(ab.ProfileApplier, "sandbox_mounts_ok", lambda *_: False)
+    _apply(ab, config, tmp_path, profiles)
+    assert fake_env.openshell_state()["sandboxes"]["default/chat"]["files"] == {
+        "notes.md": "keep me"}
+    ops = [" ".join(c[:2]) for c in fake_env.openshell_calls()]
+    assert "sandbox download" in ops and "sandbox upload" in ops
+
+
+def test_unreadable_labels_fail_before_env_recreation(
+        ab, fake_env, config, tmp_path, monkeypatch):
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    _apply(ab, config, tmp_path, profiles)
+    sandbox.env = {"A": {"value": "2"}}
+    monkeypatch.setattr(ab.ProfileApplier, "sandbox_labels", lambda *_: None)
+    before = len(fake_env.openshell_calls())
+    with pytest.raises(ab.InstallerError, match="labels cannot be read"):
+        _apply(ab, config, tmp_path, profiles)
+    ops = [" ".join(c[:2]) for c in fake_env.openshell_calls()[before:]]
+    assert "sandbox delete" not in ops and "sandbox download" not in ops
+
+
+def test_failed_sandbox_get_is_not_treated_as_missing(ab, fake_env, config, tmp_path):
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    _apply(ab, config, tmp_path, profiles)
+    sandbox.env = {"A": {"value": "2"}}
+    fake_env.deny("sandbox get")
+    before = len(fake_env.openshell_calls())
+    with pytest.raises(ab.InstallerError, match="could not be read"):
+        _apply(ab, config, tmp_path, profiles)
+    ops = [" ".join(c[:2]) for c in fake_env.openshell_calls()[before:]]
+    assert "sandbox create" not in ops and "sandbox delete" not in ops
+
+
 def test_removing_a_variable_recreates_too(ab, fake_env, config, tmp_path):
     _, sandbox, profiles = _env_sandbox(ab, {"HF_HUB_OFFLINE": {"value": "1"}})
     _secret(tmp_path, "inference", api_key="k")
@@ -209,6 +252,33 @@ def test_a_failed_restore_fails_the_apply_and_is_retried(ab, fake_env, config, t
     assert not Path(pending["default/chat"]["archive"]).exists()
 
 
+def test_a_verified_restore_is_not_repeated_after_a_crash(
+        ab, fake_env, config, tmp_path, monkeypatch):
+    _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
+    _secret(tmp_path, "inference", api_key="k")
+    cfg = _ledger_cfg(config, tmp_path)
+    _apply(ab, cfg, tmp_path, profiles)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"] = {"notes.md": "old"}
+    fake_env.set_openshell_state(state)
+    sandbox.env = {"A": {"value": "2"}}
+    original = ab.ProfileApplier.complete_migration
+    def crash(*_):
+        raise RuntimeError("crash after verified extraction")
+    monkeypatch.setattr(ab.ProfileApplier, "complete_migration", crash)
+    with pytest.raises(ab.InstallerError, match="crash after"):
+        _apply(ab, cfg, tmp_path, profiles)
+    monkeypatch.setattr(ab.ProfileApplier, "complete_migration", original)
+    state = fake_env.openshell_state()
+    state["sandboxes"]["default/chat"]["files"]["notes.md"] = "new work"
+    fake_env.set_openshell_state(state)
+    before = len(fake_env.openshell_calls())
+    _apply(ab, cfg, tmp_path, profiles)
+    assert fake_env.openshell_state()["sandboxes"]["default/chat"]["files"]["notes.md"] == "new work"
+    assert "sandbox upload" not in [" ".join(c[:2]) for c in fake_env.openshell_calls()[before:]]
+    assert _migrations(tmp_path) == {}
+
+
 def test_an_interrupted_recreation_is_finished_on_the_next_apply(ab, fake_env, config, tmp_path):
     """Killed between delete and create: the record and archive survive, the
     next apply creates the sandbox and restores the files."""
@@ -261,6 +331,8 @@ def test_the_backup_excludes_only_the_installers_mounts(ab, tmp_path):
         pass
 
     def capture(*args, **kwargs):
+        if args[-2:] == ("cat", applier.RESTORE_MARKER):
+            return ab.Result(1, "", "missing")
         if args[:2] == ("sandbox", "upload") or "rm" in args:   # restore: cleanup + upload succeed
             return ab.Result(0, "", "")
         captured.append(args[-1])
@@ -325,6 +397,56 @@ def test_the_backup_excludes_only_the_installers_mounts(ab, tmp_path):
     assert (fresh / "truly-empty").is_dir()
     assert (fresh / "private").stat().st_mode & 0o777 == 0o700
     assert (fresh / ".saw").stat().st_mode & 0o777 == 0o555       # left alone
+
+
+def test_an_empty_sandbox_archives_and_restores_with_real_tar(ab, tmp_path):
+    import subprocess
+    sb = ab.Sandbox(name="empty", type="generic")
+    ws = ab.Workspace(name="default", sandboxes=[sb])
+    applier = ab.ProfileApplier(ab.Shell(), {"mtlsGateway": "g"}, {})
+    class Captured(Exception):
+        pass
+    captured = []
+    def capture(*args, **kwargs):
+        captured.append(args[-1])
+        raise Captured()
+    applier.cli = capture
+    with pytest.raises(Captured):
+        applier.preserve_sandbox(ws, sb)
+    root = tmp_path / "sandbox"
+    (root / ".saw").mkdir(parents=True)  # the only entry is pruned
+    archive = root / ".saw-preserve.tar.gz"
+    run = captured[0].replace("cd /sandbox", f"cd {root}").replace(
+        "/sandbox/.saw-preserve.tar.gz", str(archive))
+    result = subprocess.run(["sh", "-c", run], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    listed = subprocess.run(["tar", "-tzf", str(archive)], capture_output=True,
+                            text=True, check=True).stdout.splitlines()
+    assert listed == []
+    if "GNU tar" not in subprocess.run(["tar", "--version"], capture_output=True,
+                                        text=True).stdout:
+        return  # bsdtar cannot run the installer's --no-overwrite-dir restore
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    (fresh / archive.name).write_bytes(archive.read_bytes())
+    captured.clear()
+    def capture_restore(*args, **kwargs):
+        if args[-2:] == ("cat", applier.RESTORE_MARKER):
+            return ab.Result(1, "", "missing")
+        if args[:2] == ("sandbox", "upload") or "rm" in args:
+            return ab.Result(0, "", "")
+        captured.append(args[-1])
+        raise Captured()
+    applier.cli = capture_restore
+    with pytest.raises(Captured):
+        applier.restore_sandbox(ws, sb, {"archive": str(archive),
+                                         "sha256": result.stdout.strip()})
+    restore = captured[0].replace("cd /sandbox", f"cd {fresh}").replace(
+        "/sandbox/.saw-preserve.tar.gz", str(fresh / archive.name)).replace(
+        applier.RESTORE_MARKER, str(fresh / Path(applier.RESTORE_MARKER).name))
+    done = subprocess.run(["sh", "-c", restore], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert (fresh / Path(applier.RESTORE_MARKER).name).read_text().strip() == result.stdout.strip()
 
 
 def test_a_surviving_original_is_never_overwritten_by_its_old_snapshot(
@@ -765,6 +887,43 @@ def test_an_empty_default_is_optional_in_the_form_and_the_installer(ab, tmp_path
         ab.resolve_input({"secretKeyRef": {"name": "inference", "key": "org"}}, tmp_path, "org")
 
 
+def test_model_with_empty_default_is_required_in_the_form(ab, tmp_path):
+    cat = _catalog()
+    src = {"secretKeyRef": {"name": "inference", "key": "model"}, "default": ""}
+    field = cat.input_field(src, "text", "Model", nonempty=True)
+    assert field["required"] is True
+    assert list(cat.sandbox_fields({"name": "chat", "inference": {"model": src}}))[0][1][
+        "required"] is True
+    provider = ab.Provider(name="llm", type="openai", credential_secret="inference")
+    sb = ab.Sandbox(name="chat", type="openclaw", providers=["llm"], inference={
+        "providerRef": "llm", "model": src})
+    ws = ab.Workspace(name="default", providers=[provider], sandboxes=[sb])
+    with pytest.raises(ab.InstallerError, match="inference model is empty"):
+        ab.resolve_sandbox_inference(ws, sb, tmp_path)
+    sb.inference["model"] = ""
+    assert "inference model must not be empty" in ab.sandbox_inference_problems(
+        sb, {"llm": "openai"})
+
+
+@pytest.mark.parametrize("sandbox_yaml,providers_yaml,problem", [
+    ("spec:\n  sandboxes:\n    - type: generic\n", "", "sandbox needs a name"),
+    ("spec:\n  sandboxes:\n    - name: tools\n",
+     "spec:\n  providers:\n    - name: llm\n      credentialSecret: inference\n"
+     "      credentials:\n        api_key: {title: API key}\n", "needs a secretKey"),
+])
+def test_catalog_reports_invalid_profile_fields(tmp_path, monkeypatch,
+                                                sandbox_yaml, providers_yaml, problem):
+    cat = _catalog()
+    profiles = tmp_path / "profiles"
+    wdir = profiles / "broken" / "default"
+    wdir.mkdir(parents=True)
+    (wdir / "sandbox.yaml").write_text(sandbox_yaml)
+    (wdir / "providers.yaml").write_text(providers_yaml)
+    monkeypatch.setattr(cat, "PROFILES", profiles)
+    with pytest.raises(ValueError, match=problem):
+        cat.catalog()
+
+
 def test_the_portal_accepts_an_absent_optional_field(tmp_path):
     spec = importlib.util.spec_from_file_location(
         "portal", ROOT / "charts" / "openshell-rhdh" / "files" / "portal.py")
@@ -797,10 +956,10 @@ def test_the_preserve_archive_is_inside_the_sandbox_working_directory(ab, fake_e
     """Found live: `openshell sandbox download` refuses a source outside
     the sandbox's working directory (/tmp/... was refused before any data
     moved), so an env change could never carry /sandbox over. The fake now
-    enforces the same rule; the archive and its checksum file live under
+    enforces the same rule; the archive and restore marker live under
     /sandbox and the archive excludes itself (see the real-tar test)."""
     assert ab.ProfileApplier.PRESERVE_ARCHIVE.startswith("/sandbox/")
-    assert ab.ProfileApplier.PRESERVE_SUM.startswith("/sandbox/")
+    assert ab.ProfileApplier.RESTORE_MARKER.startswith("/sandbox/")
     _, sandbox, profiles = _env_sandbox(ab, {"A": {"value": "1"}})
     _secret(tmp_path, "inference", api_key="k")
     _apply(ab, config, tmp_path, profiles)

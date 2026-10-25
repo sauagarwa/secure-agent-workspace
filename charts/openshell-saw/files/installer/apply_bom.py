@@ -1951,6 +1951,8 @@ def sandbox_inference_problems(sb, provider_types):
                    f"provider type '{provider_types[ref]}' does not imply one")
     if "model" not in spec:
         out.append("inference needs model")
+    elif spec["model"] == "":
+        out.append("inference model must not be empty")
     for key in ("baseUrl", "model"):
         if key in spec:
             out += [f"inference {key} {p}" for p in input_problems(spec[key])]
@@ -3550,7 +3552,10 @@ class ProfileApplier:
         """'running', 'broken' (Error/Completed), 'deleting' or 'missing'."""
         state = self.cli("sandbox", "get", sb.name, *ws_args(ws.name), check=False, quiet=True)
         if not state.ok:
-            return "missing"
+            if _resource_not_found(state.out + "\n" + state.err):
+                return "missing"
+            raise InstallerError(f"sandbox '{sb.name}' in workspace '{ws.name}' could not be read; "
+                                 "retry the apply when sandbox get works")
         clean = re.sub(r"\x1b\[[0-9;]*m", "", state.out)
         if re.search(r"Phase:\s*Deleting", clean):
             return "deleting"
@@ -4034,6 +4039,9 @@ class ProfileApplier:
             state = self.recover_migration(ws, sb, state, labels)
             if state == "running":
                 labels = self.sandbox_labels(ws, sb) if not self.sh.dry_run else labels
+        if state == "running" and labels is None and not self.sh.dry_run:
+            raise InstallerError(f"sandbox '{sb.name}' in workspace '{ws.name}' is running but "
+                                 "its labels cannot be read; retry the apply when sandbox get works")
         if state == "running" and labels is not None and key not in self.migrations:
             have = labels[0] or "none"             # created before the label: had no env
             if have != env_label(sb.env_values):
@@ -4044,10 +4052,10 @@ class ProfileApplier:
             # harnessRef, one that still mounts a harness it no longer has,
             # or one that mounts another volume there is created again.
             # OpenShell 0.1.x deletes the per-sandbox /sandbox workspace
-            # volume, including /sandbox/persist. Preserve needed files
-            # separately before a recreation; the harness volume is distinct.
+            # volume, including /sandbox/persist. Archive and restore the
+            # workspace files across this recreation; the harness volume is distinct.
             log(f"Sandbox '{sb.name}' has stale or missing trusted mounts; recreating it")
-            self.delete_sandbox_and_wait(ws, sb)
+            self.begin_migration(ws, sb, labels, reason="stale or missing trusted mounts")
             state = "missing"
         if state == "running":
             log(f"Sandbox '{sb.name}' already exists")
@@ -4789,10 +4797,6 @@ class ProfileApplier:
         got = self.cli("sandbox", "get", sb.name, *ws_args(ws.name), check=False, quiet=True)
         return (*(_label_from_text(got.out, k) for k in keys), "") if got.ok else None
 
-    def sandbox_env_label(self, ws, sb):
-        labels = self.sandbox_labels(ws, sb)
-        return None if labels is None else labels[0]
-
     # /sandbox is the sandbox's workspace volume, which OpenShell 0.1.x
     # deletes with the sandbox. What the installer mounts there itself is
     # excluded (it is refilled on create); the rest is carried across a
@@ -4807,7 +4811,7 @@ class ProfileApplier:
     # and the sandbox SSH proxy broke the upload more than once at that
     # size; compressed it is a fraction of that.
     PRESERVE_ARCHIVE = "/sandbox/.saw-preserve.tar.gz"
-    PRESERVE_SUM = "/sandbox/.saw-preserve.sha256"
+    RESTORE_MARKER = "/sandbox/.saw-preserve-restored.sha256"
 
     def migration_key(self, ws, sb):
         return f"{ws.name}/{sb.name}"
@@ -4839,9 +4843,10 @@ class ProfileApplier:
                              for m in sandbox_mounts(ws, sb) if m["target"].startswith("/sandbox/"))}
         prune = " ".join(f"-path {shlex.quote(p)} -prune -o" for p in sorted(pruned))
         own = shlex.quote("./" + Path(self.PRESERVE_ARCHIVE).name)
+        marker = shlex.quote("./" + Path(self.RESTORE_MARKER).name)
         script = (f"cd /sandbox || exit 3; rm -f {self.PRESERVE_ARCHIVE}; "
-                  f"find . {prune} ! -path . ! -path {own} -print0 | "
-                  f"tar -czf {self.PRESERVE_ARCHIVE} --null --no-recursion -T - && "
+                  f"find . {prune} ! -path . ! -path {own} ! -path {marker} "
+                  f"-print0 | tar -czf {self.PRESERVE_ARCHIVE} --null --no-recursion -T - && "
                   f"sha256sum {self.PRESERVE_ARCHIVE} | cut -d' ' -f1")
         packed = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
                           "sh", "-c", script, check=False)
@@ -4869,6 +4874,10 @@ class ProfileApplier:
         it over /sandbox and verify what was unpacked. Raises on failure; the
         migration record stays so the next apply tries again."""
         local = Path(record["archive"])
+        stamped = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
+                           "cat", self.RESTORE_MARKER, check=False, quiet=True)
+        if stamped.ok and stamped.out.strip() == record["sha256"]:
+            return
         if not self.sh.dry_run and not local.is_file():
             raise InstallerError(f"the archive to restore into '{sb.name}' is missing: {local}")
         # A leftover archive from an earlier attempt (a restore that failed
@@ -4893,7 +4902,9 @@ class ProfileApplier:
                   # directory mtimes drift as soon as anything is written.
                   f"tar -xzf {self.PRESERVE_ARCHIVE} --no-overwrite-dir && "
                   f"tar -tzf {self.PRESERVE_ARCHIVE} | grep -v '/$' | "
-                  f"tar -dzf {self.PRESERVE_ARCHIVE} -T - && rm -f {self.PRESERVE_ARCHIVE}")
+                  f"tar -dzf {self.PRESERVE_ARCHIVE} -T - && "
+                  f"printf '%s\\n' {q(record['sha256'])} > {self.RESTORE_MARKER} && "
+                  f"rm -f {self.PRESERVE_ARCHIVE}")
         done = self.cli("sandbox", "exec", "-n", sb.name, *ws_args(ws.name), "--no-tty", "--",
                         "sh", "-c", script, check=False)
         if not done.ok:
@@ -4913,13 +4924,13 @@ class ProfileApplier:
             except OSError:
                 pass
 
-    def begin_migration(self, ws, sb, labels):
-        """Start recreating a running sandbox whose env differs from the
-        profile's: archive and verify its /sandbox, persist the record (the
+    def begin_migration(self, ws, sb, labels, reason="a different environment"):
+        """Start recreating a running sandbox whose env or mounts differ from
+        the profile: archive and verify its /sandbox, persist the record (the
         original's identity, the replacement's instance token and the env
         it will be created with), then delete it. The record exists before
         anything is destroyed, so every later apply can finish the job."""
-        log(f"Sandbox '{sb.name}' was created with a different environment; recreating it "
+        log(f"Sandbox '{sb.name}' has {reason}; recreating it "
             "(its /sandbox files are carried over, open sessions end)")
         self.wait_exec_ready(ws, sb)
         record = self.preserve_sandbox(ws, sb)
