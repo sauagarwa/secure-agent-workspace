@@ -21,6 +21,8 @@ clusterGroup:
         - openshift-cnv
     # Shared: golden image, image builds, governance interceptor.
     openshell-agents:
+    # Cluster-wide Kubernetes sandbox controller for container workspaces.
+    agent-sandbox-system:
     # Keycloak and its RHBK operator, in a namespace of their own so they
     # never collide with a platform Keycloak (often in `keycloak`). Any
     # namespace works; see openshell-saw oidc.keycloakNamespace.
@@ -80,6 +82,17 @@ clusterGroup:
       name: openshift-cnv
       namespace: openshift-cnv
       path: charts/openshift-cnv
+    agent-sandbox:
+      name: agent-sandbox
+      namespace: agent-sandbox-system
+      path: charts/agent-sandbox
+      overrides:
+        - name: enabled
+          value: "true"
+      syncPolicy:
+        automated:
+          prune: false
+          selfHeal: true
     openshell-keycloak:
       name: openshell-keycloak
       namespace: saw-keycloak
