@@ -12,4 +12,4 @@ defaults:
   openshellSaw:
     egress:
       extraAllow:
-        - api.enmaas.devshift.net
+        - api.inference.example.com
