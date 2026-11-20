@@ -7,6 +7,8 @@ users:
   - name: alice
     profiles: [custom-inference]
     vaultPrefix: secret/data/hub/saw-alice/d2565216ccf6a6c0
+    webSearch:
+      enabled: false
     values:
       deployment: {mode: vm}
 
