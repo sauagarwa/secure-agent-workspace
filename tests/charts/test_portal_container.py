@@ -196,40 +196,41 @@ def test_model_gate_claim_is_shared_only_for_the_publisher_and_agent():
     assert claims["workspace-"+U]["accessModes"] == claims[U+"-history"]["accessModes"] == ["ReadWriteOnce"]
 
 
-def test_personal_assistant_uses_the_vm_proxy_policy_and_trusted_secret_projection():
+def app_values(application):
+    source = application["spec"]["source"]["helm"]
+    return source.get("valuesObject") or yaml.safe_load(source["values"])
+
+
+def test_personal_assistant_credentials_are_projected_for_openshell():
     owner = {**user(), "profiles":["personal-assistant"]}
-    site = {**SITE, "providerAllowHosts":["integrate.api.nvidia.com","slack.com","gmail.googleapis.com","oauth2.googleapis.com"]}
+    site = {**SITE}
     site["automaticEnrollment"]={**SITE["automaticEnrollment"],"approvedProfiles":{"personal-assistant":"a"*64}}
     parent = render("saw-users","portal-ws-"+U,"saw-portal",{"global":GLOBAL,"users":[owner],"containerSites":{U:site}})
     app, = [a for a in parent if a.get("spec",{}).get("source",{}).get("path")=="charts/saw-portal-container"]
-    resources=child(app)
-    broker,=[r for r in resources if r["kind"]=="ConfigMap" and r["metadata"]["name"].endswith("-proxy-policy")]
-    policy=json.loads(broker["data"]["config.json"])
-    bindings={b["secret"]:b for b in policy["bindings"]}
+    bindings = {b["secret"]: b for b in app_values(app)["site"]["credentialBindings"]}
     assert set(bindings)=={"gmail","slack","inference"}
-    assert bindings["gmail"]["refresh"]["tokenURL"]=="https://oauth2.googleapis.com/token"
-    assert bindings["slack"]=={"secret":"slack","key":"bot_token","providers":["slack"]}
+    assert bindings["gmail"]=={"secret":"gmail","key":"access_token","type":"gmail","refresh":"oauth2_refresh_token"}
+    assert bindings["slack"]=={"secret":"slack","key":"bot_token","type":"slack"}
+    resources=child(app)
     secrets={r["metadata"]["name"]:r for r in resources if r["kind"]=="ExternalSecret"}
-    for name,keys in {"gmail":{"refresh_token","client_id","client_secret"},"slack":{"bot_token"},"inference":{"api_key"}}.items():
+    for name,keys in {"gmail":{"access_token","refresh_token","client_id","client_secret"},"slack":{"bot_token"},"inference":{"api_key"}}.items():
         assert secrets[name]["metadata"]["namespace"]=="saw-ctl-"+REG
         assert {e["secretKey"] for e in secrets[name]["spec"]["data"]}==keys
-    proxy,=[r for r in resources if r["kind"]=="Application" and r["spec"]["source"]["path"]=="charts/saw-kubernetes-proxy"]
-    assert proxy["spec"]["source"]["helm"]["valuesObject"]["credentialSecretNames"]==sorted(secrets)
+    # No SAW credential proxy: OpenShell's supervisor injects the credentials.
+    assert not [r for r in resources if "proxy" in r["metadata"]["name"]]
+    assert not [r for r in resources if r["kind"]=="Application"
+                and r["spec"]["source"]["path"].endswith("saw-kubernetes-proxy")]
 
 
-def test_custom_inference_projection_pins_broker_url_and_keeps_key_private():
+def test_custom_inference_secret_carries_the_site_url():
     url="https://models.fixture.test/v1"
     owner={**user(),"profiles":["custom-inference"],"webSearch":{"enabled":False}}
-    site={**SITE,"providerAllowHosts":["models.fixture.test"],"customInferenceURL":url,
+    site={**SITE,"customInferenceURL":url,
           "automaticEnrollment":{**SITE["automaticEnrollment"],"approvedProfiles":{"custom-inference":"a"*64}}}
     root=render("saw-users","portal-ws-"+U,"saw-portal",{"global":GLOBAL,"users":[owner],"containerSites":{U:site}})
     app,=[a for a in root if a.get("spec",{}).get("source",{}).get("path")=="charts/saw-portal-container"]
-    resources=child(app)
-    broker,=[r for r in resources if r["kind"]=="ConfigMap" and r["metadata"]["name"].endswith("-proxy-policy")]
-    policy=json.loads(broker["data"]["config.json"])
-    assert policy["allowHosts"]==["models.fixture.test"] and not policy["profiles"].get("custom-inference")
-    assert policy["bindings"]==[{"providers":["custom-inference"],"key":"api_key","secret":"inference"}]
-    es,=[r for r in resources if r["kind"]=="ExternalSecret"]
+    assert app_values(app)["site"]["credentialBindings"]==[{"secret":"inference","key":"api_key","type":"custom-inference"}]
+    es,=[r for r in child(app) if r["kind"]=="ExternalSecret"]
     assert es["metadata"]["namespace"]=="saw-ctl-"+REG
     assert es["spec"]["target"]["template"]=={"engineVersion":"v2","mergePolicy":"Merge","data":{"url":url}}
     assert [e["secretKey"] for e in es["spec"]["data"]]==["api_key"]

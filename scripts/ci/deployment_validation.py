@@ -33,7 +33,7 @@ OWN_IMAGES = {
 }
 CONTAINER_CHILD_CHARTS = {
     "openshell-saw-kubernetes", "saw-audit-writer", "saw-kubernetes-identity",
-    "saw-kubernetes-proxy", "saw-runtime-policies",
+    "saw-runtime-policies",
 }
 CONTAINER_APIS = (
     "agents.x-k8s.io/v1beta1/Sandbox",

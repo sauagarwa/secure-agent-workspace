@@ -83,6 +83,8 @@ spec:
         volumeMounts: [{name: gate, mountPath: /volume}{{ if $target.ui }}, {name: proof, mountPath: /proof, readOnly: true}{{ end }}{{ if $gate.harness }}, {name: bom, mountPath: /bom, readOnly: true}{{ end }}]
       volumes: [{name: gate, persistentVolumeClaim: {claimName: {{ $gate.trusted.claimName }}}}{{ if $target.ui }}, {name: proof, secret: {secretName: ui-{{ $target.relayID }}-browser-proof, items: [{key: relay-proof, path: relay-proof}]}}{{ end }}{{ if $gate.harness }}, {name: bom, configMap: {name: saw-bom-profiles}}{{ end }}]
 {{- end }}
+{{- $credentialSecrets := list }}
+{{- range ($site.credentialBindings | default list) }}{{- $credentialSecrets = append $credentialSecrets .secret }}{{- end }}
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -112,7 +114,8 @@ spec:
           namespace: {{ $ns }}
           trustedNamespace: {{ $ctl }}
           governanceNamespace: {{ $site.governanceNamespace }}
-          proxyPolicy: {{ $u }}-proxy-policy
+          # The Secrets this workspace's providers read from (External Secrets copies).
+          credentialSecrets: {{ $credentialSecrets | uniq | sortAlpha | toJson }}
           ownerID: {{ $b.ownerID }}
           namespaceUID: {{ $b.namespaceUID }}
           mode: {{ $b.mode }}
@@ -124,7 +127,7 @@ spec:
           status: saw-runtime-status
           approved: {{ $e.approved | toJson }}
         trustedEgress:
-{{ toYaml $site.stack.proxy.values.network.bootstrapEgress | indent 10 }}
+{{ toYaml $site.stack.identity.values.network.bootstrapEgress | indent 10 }}
           - to:
             - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $ns }}}}
               podSelector: {matchLabels: {app.kubernetes.io/instance: {{ $u }}, openshell.pattern/role: gateway}}

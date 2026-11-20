@@ -257,3 +257,21 @@ def test_kata_enforces_reviewed_runtime_at_sandbox_and_pod():
             assert any('object.spec.runtimeClassName == "saw-kata"' in check for check in checks)
             assert any("variables.role != 'supervisor' || !has(object.spec.runtimeClassName)" in check
                        for check in checks)
+
+
+@pytest.mark.parametrize("packet,expected", [
+    ({"ip": "203.0.113.7"}, "Pass"),                       # a public provider API on 443
+    ({"ip": "203.0.113.7", "port": 80}, "Deny"),
+    ({"ip": "10.20.30.40"}, "Deny"),                       # private ranges stay closed
+    ({"ip": "172.16.0.9"}, "Deny"),
+    ({"ip": "192.168.1.1"}, "Deny"),
+    ({"ip": "169.254.169.254"}, "Deny"),                   # cloud metadata
+    ({"ip": "192.0.2.10"}, "Pass"),                        # explicit rules still apply first
+])
+def test_public_https_lets_supervisors_reach_providers_but_not_private_networks(packet, expected):
+    anp = render("--set", "network.publicHTTPS=true")["AdminNetworkPolicy"]
+    assert packet_action(anp, **packet) == expected
+
+
+def test_public_https_is_off_by_default():
+    assert packet_action(render()["AdminNetworkPolicy"], ip="203.0.113.7") == "Deny"

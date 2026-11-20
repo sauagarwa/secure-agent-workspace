@@ -31,16 +31,11 @@ metadata: {name: default-deny, namespace: {{ $runtime }}, annotations: {argocd.a
 spec: {podSelector: {}, policyTypes: [Ingress, Egress], ingress: [], egress: []}
 {{- $customSecret := "" }}
 {{- $sources := dict }}
-{{- with required "explicit governed provider policy required" (.Values.site | default dict).providerPolicy }}
-{{- $sources = dict }}
-{{- range .bindings }}
-{{- $fields := get $sources .secret | default list }}
-{{- if .refresh }}
-{{- range .refresh.material }}{{- $fields = append $fields . }}{{- end }}
-{{- else }}{{- $fields = append $fields .key }}{{- end }}
-{{- if has "custom-inference" .providers }}{{- $customSecret = .secret }}{{- end }}
+{{- range required "explicit credential bindings required" (.Values.site | default dict).credentialBindings }}
+{{- if eq .type "custom-inference" }}{{- $customSecret = .secret }}{{- end }}
+{{- $fields := append (get $sources .secret | default list) .key }}
+{{- if .refresh }}{{- $fields = concat $fields (list "client_id" "client_secret" "refresh_token") }}{{- end }}
 {{- $_ := set $sources .secret ($fields | uniq | sortAlpha) }}
-{{- end }}
 {{- end }}
 {{- range $secret, $fields := $sources }}
 ---

@@ -93,8 +93,8 @@ def test_overlay_uses_one_probe_and_preserves_separation(base, cluster):
     assert topo.host_rule("10.10.1.2", 443) not in bootstrap
     assert {"to": [{"ipBlock": {"cidr": "172.30.0.10/32"}}],
             "ports": [{"protocol": "TCP", "port": 53}, {"protocol": "UDP", "port": 53}]} in bootstrap
-    assert set(result["stack"]) == {"gateway", "proxy"}
-    assert set(result["stack"]["proxy"]["values"]["network"]) == {"bootstrapEgress"}
+    assert set(result["stack"]) == {"gateway", "identity"}
+    assert set(result["stack"]["identity"]["values"]["network"]) == {"bootstrapEgress"}
 
 
 def test_overlay_discovers_appset_controller_unless_operator_set(base, cluster):

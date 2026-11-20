@@ -47,7 +47,7 @@ metadata: {name: identity-api, namespace: {{ $trusted }}}
 spec:
   podSelector: {matchLabels: {openshell.pattern/role: identity-bootstrap}}
   policyTypes: [Egress]
-  egress: {{ $stack.proxy.values.network.bootstrapEgress | toJson }}
+  egress: {{ required "site.stack.identity.values.network.bootstrapEgress is required" (dig "identity" "values" "network" "bootstrapEgress" nil $stack) | toJson }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -60,14 +60,8 @@ spec:
         - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ $runtime }}}}
           podSelector: {matchLabels: {app.kubernetes.io/instance: {{ $u }}, openshell.pattern/role: gateway}}
       ports: [{port: 18081, protocol: TCP}]
----
-apiVersion: v1
-kind: ConfigMap
-metadata: {name: {{ $u }}-proxy-policy, namespace: {{ $trusted }}}
-data:
-  config.json: |
-    {{ required "explicit governed provider policy required" $site.providerPolicy | toJson }}
-{{- $charts := dict "identity" (list "saw-kubernetes-identity" $trusted) "policy" (list "saw-runtime-policies" $runtime) "proxy" (list "saw-kubernetes-proxy" $trusted) "gateway" (list "openshell-saw-kubernetes" $runtime) }}
+
+{{- $charts := dict "identity" (list "saw-kubernetes-identity" $trusted) "policy" (list "saw-runtime-policies" $runtime) "gateway" (list "openshell-saw-kubernetes" $runtime) }}
 {{- range $slot := $targets }}{{- $key := ternary "audit" (printf "audit-%s" $slot.relayID) (eq (len $targets) 1) }}{{- $_ := set $charts $key (list "saw-audit-writer" $archive $slot) }}{{- end }}
 {{- range $key, $c := $charts }}
 {{- $item := required (printf "missing site.stack.%s" $key) (get $stack (ternary "audit" $key (eq (len $c) 3))) }}
@@ -100,17 +94,9 @@ data:
 {{- $_ := set $policy "serverTLSSecret" (replace "@OWNER@" $u $gw.identity.serverTlsSecret) }}
 {{- $_ := set $policy "supervisorImage" (dig "supervisor" "image" $.Values.driverDefaults.supervisorImage $gw) }}
 {{- $_ := set $policy "runtimeImage" ($gw.workload.runtimeImage | default $.Values.driverDefaults.runtimeImage) }}
-{{- $proxyURL := replace "@TRUSTED@" $trusted (replace "@OWNER@" $u $gw.proxy.url) }}
-{{- $_ := set $policy "supervisorCommand" (list "/openshell-supervisor" "--backend-descriptor-file" "/.openshell/supervisor/runtime-descriptor.json" "--auth-bundle-file" "/.openshell/supervisor/auth.json" "--workdir" "/sandbox" "--health-socket-path" "/run/openshell/health.sock" "--health-port" "5501" "--upstream-proxy" $proxyURL "--upstream-proxy-connect-by-hostname" "--upstream-proxy-ca-bundle" "/.openshell/supervisor/upstream-proxy-ca.pem") }}
+{{- $_ := set $policy "supervisorCommand" (list "/openshell-supervisor" "--backend-descriptor-file" "/.openshell/supervisor/runtime-descriptor.json" "--auth-bundle-file" "/.openshell/supervisor/auth.json" "--workdir" "/sandbox" "--health-socket-path" "/run/openshell/health.sock" "--health-port" "5501") }}
+{{- $_ := set $policy.network "publicHTTPS" true }}
 {{- $values = toJson $policy }}
-{{- end }}
-{{- if and (eq $key "proxy") $site.providerPolicy }}
-{{- $proxy := fromJson $values }}
-{{- $secrets := list }}
-{{- range $site.providerPolicy.bindings }}{{- $secrets = append $secrets .secret }}{{- end }}
-{{- $_ := set $proxy "credentialSecretNames" ($secrets | uniq | sortAlpha) }}
-{{- $_ := set $proxy "policyDigest" ($site.providerPolicy | toJson | sha256sum) }}
-{{- $values = toJson $proxy }}
 {{- end }}
 {{- $release := $u }}
 {{- if eq (len $c) 3 }}

@@ -8,7 +8,7 @@ from saw_kubernetes.boundary import BoundaryError, objects, verify
 def installation():
     config = dict(namespace="runtime", namespaceUID="ns-uid", ownerID="owner",
                   mode="container", trustedNamespace="trusted", governanceNamespace="gov",
-                  gateway="gateway", proxyPolicy="proxy")
+                  gateway="gateway")
     resources = {}
     for key, (path, field) in objects(config).items():
         resources[path] = {"metadata": {"uid": key, "generation": 1}, field: {}}
@@ -16,7 +16,7 @@ def installation():
         return resources[objects(config)[key][0]]
     for key in ("validation", "secretGuard", "serviceGuard", "podDeleteGuard"):
         obj(key)["status"] = {"observedGeneration": 1, "typeChecking": {}}
-    for key in ("gateway", "governance", "proxy"):
+    for key in ("gateway", "governance"):
         obj(key)["spec"]["replicas"] = 1
         obj(key)["status"] = {"observedGeneration": 1, "readyReplicas": 1, "updatedReplicas": 1}
     obj("network")["spec"]["priority"] = 50
@@ -30,16 +30,16 @@ def installation():
 
 
 @pytest.mark.parametrize("case,reason", [
-    ("replaced", "ChangedBoundary:proxy"), ("drift", "ChangedBoundary:publicCA"),
+    ("replaced", "ChangedBoundary:governance"), ("drift", "ChangedBoundary:gatewayConfig"),
     ("new-zone", "NetworkNotRealized"), ("precedence", "EarlierNetworkPolicy"),
     ("warning", "AdmissionUnavailable"), ("rollout", "RolloutIncomplete:gateway"),
 ])
 def test_changed_or_unrealized_boundary_blocks(installation, case, reason):
     config, resources, obj, listing = installation
     if case == "replaced":
-        obj("proxy")["metadata"]["uid"] = "replacement"
+        obj("governance")["metadata"]["uid"] = "replacement"
     elif case == "drift":
-        obj("publicCA")["data"]["ca.crt"] = "new"
+        obj("gatewayConfig")["data"]["gateway.toml"] = "new"
     elif case == "new-zone":
         resources["/api/v1/nodes"]["items"].append({"metadata": {"name": "new"}})
     elif case == "precedence":

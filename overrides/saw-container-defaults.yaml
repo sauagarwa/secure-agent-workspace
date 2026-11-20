@@ -35,8 +35,6 @@ containerDefaults:
     namespace: saw-component-builds
     streams: [saw-openclaw-896d1526ee29-amd64]
   governanceNamespace: openshell-agents
-  providerAllowHosts:
-    - api.enmaas.devshift.net
   automaticEnrollment:
     enabled: true
     autoApprove: true   # dev/demo cluster: enroll on first observation, no manual review
@@ -56,6 +54,8 @@ containerDefaults:
     identity:
       values:
         enabled: true
+        network:
+          bootstrapEgress: []   # generated (API and DNS)
         ownerID: '@INSTALLATION@'
         targetNamespace: '@RUNTIME@'
         gateway: '@OWNER@'
@@ -97,39 +97,6 @@ containerDefaults:
                     podSelector: {matchLabels: {openshell.ai/boundary-role: workload}}
               ports:
                 - portNumber: {protocol: TCP, port: 5500}
-            - name: credential-proxy
-              to:
-                - pods:
-                    namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: '@TRUSTED@'}}
-                    podSelector: {matchLabels: {app.kubernetes.io/instance: '@OWNER@', openshell.pattern/role: credential-proxy}}
-              ports:
-                - portNumber: {protocol: TCP, port: 3128}
-    proxy:
-      values:
-        enabled: true
-        ownerID: '@INSTALLATION@'
-        gateway: '@OWNER@'
-        targetNamespace: '@RUNTIME@'
-        policyConfigMap: '@OWNER@-proxy-policy'
-        # credentialSecretNames and policyDigest are derived from the profile catalog.
-        network:
-          bootstrapEgress: []   # generated
-          proxyEgress:
-            - to:
-                - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}
-                  podSelector: {matchLabels: {dns.operator.openshift.io/daemonset-dns: default}}
-              ports:
-                - {protocol: UDP, port: 53}
-                - {protocol: UDP, port: 5353}
-                - {protocol: TCP, port: 53}
-                - {protocol: TCP, port: 5353}
-            - to:   # public HTTPS only; the proxy policy narrows it to providerAllowHosts
-                - ipBlock:
-                    cidr: 0.0.0.0/0
-                    except: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
-                             172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4]
-              ports:
-                - {protocol: TCP, port: 443}
     gateway:
       values:
         deployment: {mode: container}
@@ -145,9 +112,6 @@ containerDefaults:
           storage:
             gatewaySize: 1Gi
             workspaceSize: 10Gi
-          proxy:
-            url: http://@OWNER@-credential-proxy.@TRUSTED@.svc:3128
-            caConfigMap: '@OWNER@-proxy-ca'
           governance:
             endpoint: http://governance-interceptor.openshell-agents.svc:18081
           network:
@@ -161,11 +125,6 @@ containerDefaults:
                     podSelector: {matchLabels: {app.kubernetes.io/name: governance-interceptor}}
                 ports:
                   - {protocol: TCP, port: 18081}
-              - to:
-                  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: '@TRUSTED@'}}
-                    podSelector: {matchLabels: {app.kubernetes.io/instance: '@OWNER@', openshell.pattern/role: credential-proxy}}
-                ports:
-                  - {protocol: TCP, port: 3128}
         route: {enabled: false}
     audit:
       values:

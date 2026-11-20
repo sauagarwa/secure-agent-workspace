@@ -18,10 +18,10 @@ def test_briefing_plan_and_volume(tmp_path):
     ws, = plan["workspaces"]
     sb, = ws["sandboxes"]
     spec = sb["spec"]
-    assert {p["type"]:p["credentials"] for p in ws["providers"]} == {
-        "gmail":{"GMAIL_ACCESS_TOKEN":"saw-cred.gmail.access_token"},
-        "slack":{"SLACK_BOT_TOKEN":"saw-cred.slack.bot_token"},
-        "nvidia":{"NVIDIA_API_KEY":"saw-cred.inference.api_key"}}
+    assert {p["type"]:p["credentialRef"] for p in ws["providers"]} == {
+        "gmail":{"secret":"gmail","key":"access_token"},
+        "slack":{"secret":"slack","key":"bot_token"},
+        "nvidia":{"secret":"inference","key":"api_key"}}
     mount, = [m for m in spec["template"]["driver_config"]["kubernetes"]["containers"]["agent"]["volume_mounts"]
               if m["mount_path"]=="/sandbox/harness"]
     assert mount["read_only"] and mount["name"]=="saw-gate"
@@ -43,5 +43,5 @@ def test_untrusted_briefing_is_rejected(fault):
     if fault=="edited": files[ks[0]]=base64.b64encode(b"tampered").decode()
     if fault=="no-index": del files["harness-index.yaml"]
     if fault=="no-approval": del cfg["bindings"]["personal-assistant/assistant"]["toolGate"]["harness"]
-    if fault=="missing-provider": cfg["proxyBindings"]=[b for b in cfg["proxyBindings"] if b["type"]!="gmail"]
+    if fault=="missing-provider": cfg["credentialBindings"]=[b for b in cfg["credentialBindings"] if b["type"]!="gmail"]
     with pytest.raises(ContractError): compile_profile_files(files,cfg)

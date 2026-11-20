@@ -187,15 +187,10 @@ def site_config():
     pin = "a" * 40
     image = "registry.example.invalid/worker@sha256:" + "b" * 64
     return {
-        "providerAllowHosts": ["api.example.invalid"],
-        "providerPolicy": {"allowHosts": ["api.example.invalid"]},
+        "credentialBindings": [{"secret": "inference", "key": "api_key", "type": "openai"}],
         "automaticEnrollment": {"revision": pin, "image": image},
         "stack": {
             "policy": {"revision": pin},
-            "proxy": {"revision": pin, "values": {
-                "image": image,
-                "network": {"bootstrapEgress": [{"to": ["api.example.invalid"]}]},
-            }},
             "gateway": {"revision": pin, "values": {
                 "kubernetes": {"storage": {"className": "workspace-rwx"}, "image": image},
             }},
@@ -216,7 +211,7 @@ def test_site_configuration_requires_pinned_sources_and_scoped_egress():
         "revisions": True,
     }
     changed = site_config()
-    changed["providerPolicy"]["allowHosts"] = ["*"]
+    changed["credentialBindings"] = [{"secret": "inference", "key": "api_key"}]
     changed["stack"]["gateway"]["revision"] = "main"
     changed["stack"]["audit"]["values"]["image"] = "image:latest"
     facts = preflight.configuration_facts(changed)
@@ -235,22 +230,20 @@ def test_site_configuration_requires_pinned_sources_and_scoped_egress():
     del missing_component["stack"]["audit"]
     assert preflight.configuration_facts(missing_component)["revisions"] is False
     invalid_network = site_config()
-    invalid_network["stack"]["proxy"]["values"]["network"]["bootstrapEgress"] = "all"
+    del invalid_network["stack"]["policy"]
     assert preflight.configuration_facts(invalid_network)["network"] is False
 
 
-def test_documented_provider_hosts_do_not_need_generated_policy():
+def test_credential_bindings_name_a_secret_key_and_provider_type():
     site = site_config()
-    del site["providerPolicy"]
     assert preflight.configuration_facts(site)["providerEgress"] is True
-    for hosts in ([], ["*"], ["api.example.invalid", "*.example.invalid"]):
-        site["providerAllowHosts"] = hosts
+    site["credentialBindings"].append({"secret": "gmail", "key": "access_token", "type": "gmail",
+                                       "refresh": "oauth2_refresh_token"})
+    assert preflight.configuration_facts(site)["providerEgress"] is True
+    for bad in ({"secret": "", "key": "k", "type": "t"}, {"secret": "s", "key": "k"},
+                {"secret": "s", "key": "k", "type": "t", "allowHosts": ["*"]}):
+        site["credentialBindings"] = [bad]
         assert preflight.configuration_facts(site)["providerEgress"] is False
-    site["providerAllowHosts"] = ["api.example.invalid"]
-    site["providerPolicy"] = {"allowHosts": ["other.example.invalid"]}
-    assert preflight.configuration_facts(site)["providerEgress"] is False
-    site["providerPolicy"] = {"allowHosts": [{}]}
-    assert preflight.configuration_facts(site)["providerEgress"] is False
 
 
 def test_storage_preflight_rejects_missing_class_and_accepts_default_class():

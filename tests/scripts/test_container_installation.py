@@ -112,7 +112,6 @@ def test_update_cannot_adopt_another_registration(field):
 
 def test_make_preflight_accepts_a_first_registration_with_complete_approval(monkeypatch):
     values, user = install.select(inputs(), "alice")
-    del values["containerSites"]["alice"]["providerPolicy"]
     assert install.preflight_checks.configuration_facts(values["containerSites"]["alice"])["providerEgress"]
     calls = []
     monkeypatch.setattr(install, "get", lambda kind, name, namespace=None:

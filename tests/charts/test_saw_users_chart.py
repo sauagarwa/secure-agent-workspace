@@ -69,9 +69,9 @@ def helm_values(application):
     return yaml.safe_load(application["spec"]["source"]["helm"]["values"])
 
 
-def test_container_policy_is_derived_from_documented_hosts(tmp_path):
+def test_container_credentials_are_bound_by_secret_and_type(tmp_path):
     site = yaml.safe_load((ROOT / "tests/fixtures/container-site.yaml").read_text())["portal"]["containerSites"]["alice"]
-    del site["providerPolicy"]
+    site.pop("credentialBindings", None)
     user = {
         "name": "alice", "registration": "a" * 16,
         "installationID": "22222222-2222-4222-8222-222222222222",
@@ -81,7 +81,9 @@ def test_container_policy_is_derived_from_documented_hosts(tmp_path):
     }
     docs = docs_from(render_file(tmp_path, [user], {"containerSites": {"alice": site}}))
     rendered_site = helm_values(app(docs, "saw-alice"))["site"]
-    assert rendered_site["providerPolicy"]["allowHosts"] == site["providerAllowHosts"]
+    assert "providerPolicy" not in rendered_site and "providerAllowHosts" not in rendered_site
+    assert {b["secret"] for b in rendered_site["credentialBindings"]} >= {"inference"}
+    assert all(set(b) >= {"secret", "key", "type"} for b in rendered_site["credentialBindings"])
 
 
 def container_alice(**extra):

@@ -42,6 +42,9 @@
           "items": {
             "$ref": "#/definitions/egressRule"
           }
+        },
+        "publicHTTPS": {
+          "type": "boolean"
         }
       },
       "required": [

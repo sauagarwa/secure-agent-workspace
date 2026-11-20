@@ -36,7 +36,8 @@ def configure(command, driver, bundle, workspace, sandbox, catalog):
     """Add only the approved RO tree and retain the existing signed tool gate."""
     info = shared.describe_harness_tree(bundle_tree(bundle), inline=True)
     attached = {p.type for p in workspace.providers if p.enabled and p.name in sandbox.providers}
-    shared.check_harness_governance(workspace, sandbox, info, catalog, attached)
+    if catalog is not None:  # None: checked later against the gateway's profiles
+        shared.check_harness_governance(workspace, sandbox, info, catalog, attached)
     config = shared.openclaw_harness_config(info)
     ids = shared.harness_plugin_ids(info)
     if any(not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or name == "saw-tool-gate" for name in ids):

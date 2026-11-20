@@ -16,7 +16,7 @@ import yaml
 SCRIPTS = Path(__file__).resolve().parent
 DNS_LABEL = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?")
 GATEWAY = ("stack", "gateway", "values")
-BOOTSTRAP = ("stack", "proxy", "values", "network", "bootstrapEgress")
+BOOTSTRAP = ("stack", "identity", "values", "network", "bootstrapEgress")
 RELAY = ("automaticEnrollment", "relay")
 
 

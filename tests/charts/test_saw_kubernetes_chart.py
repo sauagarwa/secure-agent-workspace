@@ -267,3 +267,12 @@ def test_openshell_startup_timeouts_must_be_in_supported_range(assignment):
     result = template('--set', assignment)
     assert result.returncode != 0
     assert not result.stdout.strip()
+
+
+def test_native_providers_need_no_upstream_proxy():
+    docs = render('--set', 'kubernetes.proxy.url=', '--set', 'kubernetes.proxy.caConfigMap=')
+    driver = config(docs)['drivers']['kubernetes']
+    for key in ('https_proxy', 'proxy_connect_by_hostname', 'proxy_ca_bundle'):
+        assert key not in driver
+    sts = next(v for (kind, _), v in docs.items() if kind == 'StatefulSet')
+    assert 'proxy-ca' not in {v['name'] for v in sts['spec']['template']['spec']['volumes']}

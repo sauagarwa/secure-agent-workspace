@@ -167,7 +167,7 @@ def compile_profile(profile_dir, config):
 
 
 def _openclaw_startup(kind, info):
-    slot, _ = governed.requirements(kind, info.get("baseUrl"))
+    key_env = governed.inference_key_env(kind)
     endpoint = info.get("baseUrl") or shared.NATIVE_BASE_URLS[kind]
     provider_id = shared.openclaw_managed_provider_id(kind)
     timeout = info.get("timeoutSeconds", 0)
@@ -176,7 +176,7 @@ def _openclaw_startup(kind, info):
             .replace("@SAW_BASE_URL@", json.dumps(endpoint))
             .replace("@SAW_TIMEOUT@", f"timeoutSeconds: {timeout}, " if timeout else "")
             .replace("@SAW_API@", "anthropic-messages" if info["protocol"] == "anthropic" else "openai-completions")
-            .replace("@SAW_KEY_ENV@", slot["env_vars"][0])
+            .replace("@SAW_KEY_ENV@", key_env)
             .replace("@SAW_PROVIDER_ID@", provider_id))
 
 
@@ -197,7 +197,7 @@ def _compatible_inference(workspace, sandbox, config):
         except (ValueError, TypeError) as exc:
             raise ContractError("custom inference endpoint is not approved") from exc
     inputs = config.get("modelInputs", {})
-    credentials = {(b["secret"], b["key"]) for b in config.get("proxyBindings", [])}
+    credentials = {(b["secret"], b["key"]) for b in config.get("credentialBindings", [])}
     def read_model(secret, key):
         if secret != provider.credential_secret or (secret, key) in credentials:
             raise ContractError("model input is outside the public inference binding")
@@ -225,7 +225,10 @@ def _compatible_inference(workspace, sandbox, config):
     return provider, info
 
 
-def compile_profile_files(files, config):
+REFRESH_MATERIAL = ("client_id", "client_secret", "refresh_token")
+
+
+def compile_profile_files(files, config, gateway_profiles=None):
     """Compile stock SAW ConfigMap data with administrator-approved bindings.
 
     The shared VM/Kubernetes core owns document parsing, models and semantic
@@ -246,7 +249,7 @@ def compile_profile_files(files, config):
         raise ContractError("profile documents fail shared SAW schema or semantic validation") from None
     mapping(config, {"ownerID", "namespace", "namespaceUID", "ownerSubject", "mode",
                      "workloadRuntimeClass", "workloadRuntimeClassUID", "workloadRuntimeClassDigest", "bindings",
-                     "approvedCredentialFreeProviders", "gatewayVersion", "retiredSandboxes", "modelInputs", "proxyBindings", "customInferenceURL"},
+                     "approvedCredentialFreeProviders", "gatewayVersion", "retiredSandboxes", "modelInputs", "credentialBindings", "customInferenceURL"},
             {"ownerID", "namespace", "namespaceUID", "ownerSubject", "mode", "bindings",
              "approvedCredentialFreeProviders", "gatewayVersion"}, "administrator configuration")
     try:
@@ -295,23 +298,29 @@ def compile_profile_files(files, config):
             name(provider.name, "provider")
             name(provider.type, "provider type")
             # All semantic checks (references, credentialFree, governed names)
-            # live in the common core. The trusted proxy owns private credentials and refresh.
+            # live in the common core. OpenShell owns the credential once the
+            # reconciler hands it over; the plan only names where it comes from.
             entry = {"metadata": {"name": provider.name, "labels": {
                 MANAGED: "kubernetes-runtime", OWNER: owner}}, "type": provider.type}
-            if not config.get("proxyBindings") and (provider.refresh_strategy or provider.credentials_spec or provider.credential_secret_key != "api_key"):
+            if provider.credentials_spec or provider.refresh_strategy not in ("", "oauth2_refresh_token"):
                 raise ContractError("provider requires an unported credential/refresh capability or approval")
             if provider.credential_free:
                 if provider.type == "custom-inference":
                     raise ContractError("custom inference requires a bound credential")
                 if provider.type not in approved:
                     raise ContractError("credential-free provider requires administrator approval")
-            elif config.get("proxyBindings"):
-                try:
-                    entry["credentials"] = governed.checked_marker(provider, config["proxyBindings"], config.get("customInferenceURL"))
-                except ValueError as exc:
-                    raise ContractError(str(exc)) from exc
             else:
-                raise ContractError("provider requires an unported credential/refresh capability or approval")
+                ref = {"secret": provider.credential_secret, "key": provider.credential_secret_key,
+                       "type": provider.type}
+                if provider.refresh_strategy:
+                    ref["refresh"] = provider.refresh_strategy
+                if ref not in config.get("credentialBindings", []):
+                    raise ContractError("provider credential is not one the site approved")
+                entry["credentialRef"] = {"secret": ref["secret"], "key": ref["key"]}
+                if provider.refresh_strategy:
+                    # OpenShell refreshes the access token from this material
+                    # (in the same Secret) once the reconciler configures it.
+                    entry["refresh"] = {"strategy": provider.refresh_strategy, "material": list(REFRESH_MATERIAL)}
             providers.append(entry)
         sandboxes = []
         for sandbox in workspace.sandboxes:
@@ -328,7 +337,7 @@ def compile_profile_files(files, config):
                 raise ContractError("UI route capability requires the matching approved OpenClaw browser binding")
             if sandbox.type in ("openclaw", "nemoclaw"):
                 inference_provider, info = _compatible_inference(workspace, sandbox, config)
-                if not any(p["metadata"]["name"] == inference_provider.name and p.get("credentials")
+                if not any(p["metadata"]["name"] == inference_provider.name and p.get("credentialRef")
                            for p in providers):
                     raise ContractError("agent requires an explicitly bound inference credential")
                 kind = inference_provider.type
@@ -425,7 +434,10 @@ exec openclaw gateway""")
                     if not gate.get("receiptKey") or sandbox.type not in ("openclaw", "nemoclaw"):
                         raise ContractError("harness requires an enrolled agent and signed tool gate")
                     provider_types = {p.type for p in workspace.providers if p.enabled and p.name in sandbox.providers}
-                    catalog = {t: governed.requirements(t)[1] for t in provider_types if t in governed.SUPPORTED}
+                    # The providers the gateway serves, as in VM mode; enrollment has
+                    # no gateway yet and leaves this check to the controller.
+                    catalog = (None if gateway_profiles is None else
+                               {t: gateway_profiles[t] for t in provider_types if t in gateway_profiles})
                     harness.configure(command, driver, bundles[expected_harness["name"]], workspace, sandbox, catalog)
             except shared.InstallerError as exc:
                 raise ContractError(str(exc)) from exc

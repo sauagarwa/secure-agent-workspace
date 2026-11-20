@@ -4,7 +4,6 @@ import json
 
 import yaml
 
-from . import provider as governed
 
 
 class BoundaryError(ValueError):
@@ -55,10 +54,6 @@ def objects(config):
         "governanceService": (f"{core}/{governance}/services/governance-interceptor", "spec"),
         "governancePolicy": (f"{core}/{governance}/configmaps/governance-interceptor-policy", "data"),
         "governanceProfiles": (f"{core}/{governance}/configmaps/governance-interceptor-profiles", "data"),
-        "proxy": (f"{apps}/{trusted}/deployments/{gateway}-credential-proxy", "spec"),
-        "proxyNetwork": (f"{net}/{trusted}/networkpolicies/{gateway}-credential-proxy", "spec"),
-        "proxyPolicy": (f"{core}/{trusted}/configmaps/{config['proxyPolicy']}", "data"),
-        "publicCA": (f"{core}/{ns}/configmaps/{gateway}-proxy-ca", "data"),
     }
 
 
@@ -105,19 +100,6 @@ def verify(config, plan, get):
                 or fingerprint(obj[field]) != expected["sha256"]):
             raise BoundaryError("ChangedBoundary:" + key)
         observed[key] = obj
-    for workspace in plan.get("workspaces", []):
-        for provider in workspace["providers"]:
-            credentials = provider.get("credentials")
-            if credentials:
-                policy = json.loads(observed["proxyPolicy"]["data"]["config.json"])
-                kind = provider.get("type", "openai")
-                if kind not in {"openai", "custom-inference"}:
-                    live = observed["governanceProfiles"]["data"].get(kind + ".yaml", "")
-                    if yaml.safe_load(live) != governed.document(kind):
-                        raise BoundaryError("ProviderGovernanceMismatch")
-                if not governed.check_policy(kind, credentials, policy, plan.get("customInferenceURL")):
-                    raise BoundaryError("OpenAIProxyBindingMismatch" if kind == "openai"
-                                        else "ProviderProxyBindingMismatch")
     checks = ["validation", "secretGuard", "serviceGuard", "podDeleteGuard"]
     if config["mode"] == "kata":
         import tomllib
@@ -148,7 +130,7 @@ def verify(config, plan, get):
                 and c.get("reason") == "SetupSucceeded"}
     if not zones or not zones <= realized:
         raise BoundaryError("NetworkNotRealized")
-    for key in ("gateway", "governance", "proxy"):
+    for key in ("gateway", "governance"):
         obj = observed[key]
         status = obj.get("status", {})
         if (status.get("observedGeneration") != obj["metadata"]["generation"]

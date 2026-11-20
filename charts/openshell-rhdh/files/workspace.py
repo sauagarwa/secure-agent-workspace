@@ -278,8 +278,7 @@ def _project_workspace(workspace, defaults, site, catalog, read=None):
         # autoApprove sites have no operator-reviewed reference to pin.
         reviewed = {"reference": boundary["reference"]} if "reference" in boundary or \
             automatic.get("autoApprove") is not True else {}
-        site = {**site, "providerAllowHosts": boundary["allowHosts"],
-                "automaticEnrollment": {**automatic, **reviewed}}
+        site = {**site, "automaticEnrollment": {**automatic, **reviewed}}
         # A static entry takes the site-approved endpoint unless it names one.
         if (not ws.get("customInferenceURL") and boundary.get("inferenceBaseURL")
                 and any(sb.get("endpointInput") for _, sb in enabled_catalog_sandboxes(catalog[selected]))):

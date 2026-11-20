@@ -91,9 +91,8 @@ field. Start from the component charts' values and schemas:
 | Site input | Contents / source |
 |---|---|
 | `subject` | Resolved Keycloak subject UUID matching the owner. Static inputs supply it explicitly; RHDH resolves the authenticated owner and requires a matching site. |
-| `stack.identity` | Pinned revision and [identity chart values](../charts/saw-kubernetes-identity/values.yaml): installation identity, gateway SANs and stock generator/helper images. Administrator sessions use the VM's shared temporary-identity mechanism; no administrator certificate or renewal input is supplied. |
+| `stack.identity` | Pinned revision and [identity chart values](../charts/saw-kubernetes-identity/values.yaml): installation identity, gateway SANs, stock generator/helper images and the bootstrap's API/DNS egress (`network.bootstrapEgress`). Administrator sessions use the VM's shared temporary-identity mechanism; no administrator certificate or renewal input is supplied. |
 | `stack.policy` | Pinned revision and [admission/network values](../charts/saw-runtime-policies/values.yaml): runtime namespace, service accounts, explicit egress and unique priority. |
-| `stack.proxy` | Pinned revision and [credential-proxy values](../charts/saw-kubernetes-proxy/values.yaml): trusted namespace and egress. Provider bindings/digest derive from the shared catalog. |
 | `stack.gateway` | Pinned revision and [gateway values](../charts/openshell-saw-kubernetes/values.yaml): stock gateway/driver images, storage, OIDC and network configuration. |
 | `stack.audit` | Pinned revision and [audit values](../charts/saw-audit-writer/values.yaml): history/exchange storage classes, image and owner identity. Targets derive from the BOM. |
 | `governanceNamespace`, `providerAllowHosts` | Shared governance location and permitted provider destinations. |

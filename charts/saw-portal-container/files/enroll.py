@@ -84,7 +84,7 @@ def once(x):
             ("validatingadmissionpolicies", "validatingadmissionpolicybindings"))
         verify_kata_platform(x, runtime_class, configs, nodes, api_readiness, cluster_version)
     cfg=dict(namespace=ns,namespaceUID=nsobj["uid"],ownerID=ident,mode=mode,trustedNamespace=t,
-             governanceNamespace=x["governance"],gateway=u,proxyPolicy=u+"-proxy-policy",slotKeys=sorted(x["targets"]))
+             governanceNamespace=x["governance"],gateway=u,slotKeys=sorted(x["targets"]))
     if runtime: cfg["workloadRuntimeClass"]=runtime["name"]
     cache={}
     def get(p):
@@ -129,10 +129,8 @@ def once(x):
     if runtime:
         bindings.update(workloadRuntimeClass=runtime["name"],workloadRuntimeClassUID=runtime["uid"],
                         workloadRuntimeClassDigest=runtime["sha256"])
-    if x.get("providerPolicy"):
-        bindings["proxyBindings"] = [{"secret": b["secret"], "key": b["key"], "type": typ,
-                                      "refresh": bool(b.get("refresh"))}
-                                     for b in x["providerPolicy"]["bindings"] for typ in b["providers"]]
+    if x.get("credentialBindings"):
+        bindings["credentialBindings"] = x["credentialBindings"]
     if x.get("customInferenceURL"):
         bindings["customInferenceURL"] = x["customInferenceURL"]
     if x.get("modelInputs"):

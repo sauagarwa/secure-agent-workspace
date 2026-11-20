@@ -213,7 +213,7 @@ def configuration_facts(site):
     revision_pattern = BRANCH_REVISION if isinstance(enrollment, dict) and enrollment.get(
         "autoApprove") is True else PINNED_REVISION
     revisions = [item.get("revision") for item in stack.values() if isinstance(item, dict)]
-    required_components = ("identity", "policy", "proxy", "gateway", "audit")
+    required_components = ("identity", "policy", "gateway", "audit")
     revision_pin = all(isinstance(stack.get(name), dict) for name in required_components) and all(
         isinstance(stack[name].get("revision"), str)
         and re.fullmatch(revision_pattern, stack[name]["revision"])
@@ -242,28 +242,20 @@ def configuration_facts(site):
                 walk(child, path)
     walk(site)
 
-    declared_hosts = site.get("providerAllowHosts")
-    policy = site.get("providerPolicy")
-    clean_hosts = (isinstance(declared_hosts, list) and bool(declared_hosts)
-                   and all(isinstance(host, str) and host and "*" not in host
-                           for host in declared_hosts)
-                   and (policy is None or (isinstance(policy, dict)
-                        and isinstance(policy.get("allowHosts"), list)
-                        and all(isinstance(host, str) for host in policy["allowHosts"])
-                        and set(policy["allowHosts"]) == set(declared_hosts))))
-    proxy = stack.get("proxy") or {}
-    proxy_values = proxy.get("values") or {} if isinstance(proxy, dict) else {}
-    bootstrap_egress = ((proxy_values.get("network") or {}).get("bootstrapEgress")
-                        if isinstance(proxy_values, dict) else None)
+    # OpenShell decides where each credential may go (provider profiles); the
+    # site only lists which Secret backs which provider type.
+    bindings = site.get("credentialBindings")
+    clean_bindings = (isinstance(bindings, list) and all(
+        isinstance(b, dict) and {"secret", "key", "type"} <= set(b) <= {"secret", "key", "type", "refresh"}
+        and all(isinstance(v, str) and v for v in b.values()) for b in bindings))
     storage_ok = bool(storage_values) and all(value.strip() for value in storage_values)
     return {
-        "network": bool(stack.get("policy")) and isinstance(bootstrap_egress, list)
-                   and bool(bootstrap_egress),
+        "network": bool(stack.get("policy")),
         "storage": storage_ok,
         "secrets": isinstance(site.get("secretStore", "vault-backend"), str)
                    and bool(site.get("secretStore", "vault-backend")),
         "registry": bool(image_values) and all("@sha256:" in image for image in image_values),
-        "providerEgress": clean_hosts,
+        "providerEgress": clean_bindings,
         "revisions": revision_pin,
     }
 
