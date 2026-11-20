@@ -57,26 +57,34 @@ def main():
                         os.environ["POD_NAME"], os.environ["POD_UID"])
     sessions = GatewaySessions(trust, endpoint)
     state = Path("/state")
+    catalog = {}
+
+    def list_profiles(gateway):
+        """Platform provider profiles the gateway serves: type -> endpoint hosts."""
+        profiles, token = {}, ""
+        while True:
+            page = gateway.call("ListProviderProfiles", {"page_size": 1000, "page_token": token})
+            for profile in page.get("profiles", []):
+                profiles[profile["id"]] = [e["host"] for e in profile.get("endpoints", [])]
+            token = page.get("next_page_token", "")
+            if not token:
+                return profiles
+
     def reconcile(plan, **kwargs):
         with sessions.open() as gateway:
+            # Refresh the catalog in the session we already hold: every session
+            # mints a client identity the gateway must first trust, so a second
+            # session per cycle keeps losing that race.
+            catalog["profiles"] = list_profiles(gateway)
             return Reconciler(gateway, state / "core", resources.verify_attachments,
                               verify_shutdown=resources.verify_shutdown,
                               read_credential=read_credential).reconcile(plan, **kwargs)
 
-    def gateway_profiles():
-        """Platform provider profiles the gateway serves: type -> endpoint hosts."""
-        profiles, token = {}, ""
-        with sessions.open() as gateway:
-            while True:
-                page = gateway.call("ListProviderProfiles", {"page_size": 1000, "page_token": token})
-                for profile in page.get("profiles", []):
-                    profiles[profile["id"]] = [e["host"] for e in profile.get("endpoints", [])]
-                token = page.get("next_page_token", "")
-                if not token:
-                    return profiles
-
     def compile_files(files, bindings):
-        return compile_profile_files(files, bindings, gateway_profiles())
+        if "profiles" not in catalog:  # first cycle only
+            with sessions.open() as gateway:
+                catalog["profiles"] = list_profiles(gateway)
+        return compile_profile_files(files, bindings, catalog["profiles"])
     frontend = Controller(api, scope, state, compile_files, reconcile, boundary)
     stopped = False
     def stop(signum, frame):
