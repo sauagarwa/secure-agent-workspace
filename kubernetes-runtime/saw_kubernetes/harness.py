@@ -32,6 +32,13 @@ def binding_for(sandbox, bundles):
     return {"name": bundle.name, "digest": bundle.digest}
 
 
+def tool_rules(bundle):
+    """The enrolled bundle's own tool rules, for the gate policy and the allowlist."""
+    if bundle is None:
+        return []
+    return shared.harness_tool_rules(shared.describe_harness_tree(bundle_tree(bundle), inline=True))
+
+
 def configure(command, driver, bundle, workspace, sandbox, catalog):
     """Add only the approved RO tree and retain the existing signed tool gate."""
     info = shared.describe_harness_tree(bundle_tree(bundle), inline=True)
@@ -44,6 +51,9 @@ def configure(command, driver, bundle, workspace, sandbox, catalog):
         raise shared.InstallerError("invalid or reserved harness plugin ID")
     policy = yaml.safe_load((Path(shared.__file__).parent / "tool-actions.yaml").read_text())
     tools = {r["tool"] for r in policy["rules"] if r["action"] in ("allow", "approval")}
+    # The bundle's own tools, unless the base policy already decides them (as in the gate).
+    named = {r["tool"] for r in policy["rules"]}
+    tools |= {r["tool"] for r in shared.harness_tool_rules(info) if r["tool"] not in named}
     discovery = {"tool_search", "tool_call"}
     mcp_tools = sorted(t for t in tools if t in discovery or t.partition("__")[0] in info["mcpServers"])
     spec = {"trustEnv": shared.MCP_TRUST_ENV, "tools": mcp_tools, "digest": bundle.digest, "paths": config.get("plugins.load.paths", []),

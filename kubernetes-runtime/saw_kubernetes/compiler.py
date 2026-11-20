@@ -386,7 +386,9 @@ def compile_profile_files(files, config, gateway_profiles=None):
                 assets = Path(shared.__file__).parent
                 receipt_key = bindings[key]["toolGate"].get("receiptKey")
                 try:
-                    _, _, gate_digest, _ = shared.tool_gate_bundle(assets, identity, receipt_key)
+                    enrolled = harness.binding_for(sandbox, bundles)
+                    rules = harness.tool_rules(bundles[enrolled["name"]] if enrolled else None)
+                    _, _, gate_digest, _ = shared.tool_gate_bundle(assets, identity, receipt_key, rules)
                 except shared.InstallerError as exc:
                     raise ContractError(str(exc)) from exc
                 script = Path(__file__).with_name("tool_gate_preflight.js").read_text()

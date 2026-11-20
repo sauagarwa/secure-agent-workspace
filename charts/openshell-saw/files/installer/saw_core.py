@@ -1113,13 +1113,24 @@ def tool_gate_identity(owner, subject, workspace, sandbox):
             "sandbox": sandbox, "workspace": workspace}
 
 
-def tool_gate_bundle(here, identity, receipt_key=None):
-    """Build the identical policy, identity and OpenClaw extension for both runtimes."""
+def tool_gate_bundle(here, identity, receipt_key=None, harness_rules=()):
+    """Build the identical policy, identity and OpenClaw extension for both runtimes.
+
+    `harness_rules` are the enrolled harness's own tool rules
+    (harness_tool_rules). They follow the base rules, so where both name a
+    tool the base rule decides, and the pinned policy hash covers them.
+    """
     names = ("tool-actions.yaml", "tool-gate.mjs", "tool-gate-plugin.mjs")
     missing = [name for name in names if not (here / name).is_file()]
     if missing:
         raise InstallerError("tool gate files missing from the installer disk: " + ", ".join(missing))
     policy = (here / "tool-actions.yaml").read_bytes()
+    if harness_rules:
+        lines = [b"", b"  # From the enrolled harness bundle (its own MCP tools only)."]
+        for rule in harness_rules:
+            lines += [f"  - id: {rule['id']}".encode(), f"    tool: {rule['tool']}".encode(),
+                      f"    action: {rule['action']}".encode()]
+        policy = policy.rstrip(b"\n") + b"\n".join(lines) + b"\n"
     policy_hash = "sha256:" + hashlib.sha256(policy).hexdigest()
     plugin = (here / "tool-gate-plugin.mjs").read_bytes().replace(
         b"__SAW_POLICY_HASH__", policy_hash.encode())
@@ -1142,6 +1153,14 @@ def tool_gate_bundle(here, identity, receipt_key=None):
 
 # Inline harness parsing and OpenClaw registration are shared by both installers.
 HARNESS_MOUNT = "/sandbox/harness"
+# A bundle can allow its own MCP tools or ask for approval; refusing is the
+# default, and the site's tool-actions.yaml can still deny or require approval.
+HARNESS_TOOL_ACTIONS = ("allow", "approval")
+
+
+def harness_tool_rules(info):
+    """The tool-gate rules a described harness declares for its own MCP tools."""
+    return list(info.get("toolRules", []))
 
 
 # mcp.json env/header value: exactly ${VAR}, or Authorization-style
@@ -1286,6 +1305,29 @@ def describe_harness_tree(files, inline=False, *, warn=lambda _: None):
                     "governanceProfile in harness.yaml spec.mcpServers")
             governance.append({"kind": "MCP server", "name": server,
                                "governanceProfile": profile, "hosts": [host]})
+    tool_rules = []
+    for server, decl in sorted(declared.items()):
+        tools = decl.get("tools")
+        if tools is None:
+            continue
+        if server not in mcp_server_names:
+            raise InstallerError(
+                f"harness '{name}': tools are declared for '{server}', which mcp.json does not "
+                "define; a bundle may only set actions for its own MCP servers' tools")
+        if not isinstance(tools, list):
+            raise InstallerError(f"harness '{name}': mcp server '{server}' tools must be a list")
+        for item in tools:
+            if (not isinstance(item, dict) or set(item) != {"name", "action"}
+                    or not isinstance(item["name"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", item["name"])
+                    or item["action"] not in HARNESS_TOOL_ACTIONS):
+                raise InstallerError(
+                    f"harness '{name}': mcp server '{server}' tools entries need exactly a name "
+                    "(letters, digits, '_' or '-') and an action of allow or approval")
+            tool_rules.append({"id": f"harness-{server}-{item['name']}",
+                               "tool": f"{server}__{item['name']}", "action": item["action"]})
+    if len({r["id"] for r in tool_rules}) != len(tool_rules):
+        raise InstallerError(f"harness '{name}': a tool is declared twice")
     bundle_id = name
     if "plugin.json" in files:
         try:
@@ -1303,6 +1345,7 @@ def describe_harness_tree(files, inline=False, *, warn=lambda _: None):
         "mcpConfigs": mcp_configs,
         "pluginDirs": plugin_dirs,
         "governance": governance,
+        "toolRules": tool_rules,
     }
 
 

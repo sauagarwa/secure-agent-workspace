@@ -28,9 +28,9 @@ def verify(directory, files, model_selector=False, browser=False):
             raise ValueError("existing gate differs from the requested policy or owner")
 
 
-def publish(root, identity, receipt_key=None, *, model=None, generation=None, browser=False):
+def publish(root, identity, receipt_key=None, *, model=None, generation=None, browser=False, harness_rules=()):
     assets = Path(shared.__file__).parent
-    files, _, digest, _ = shared.tool_gate_bundle(assets, identity, receipt_key)
+    files, _, digest, _ = shared.tool_gate_bundle(assets, identity, receipt_key, harness_rules)
     target = root / "bundle"
     publish_tree(root, target, files, model_selector=model is not None, browser=browser)
     if model is not None:
@@ -66,6 +66,7 @@ def publish_harness(root, bom, name, expected_digest):
     if not bundle or bundle.name != name or bundle.digest != expected_digest:
         raise ValueError("mounted BOM does not match enrolled harness")
     publish_tree(root, root / ("harness-" + bundle.digest.removeprefix("sha256:")), bundle_tree(bundle))
+    return bundle
 
 
 def publish_model(root, target, model, generation):
@@ -132,9 +133,11 @@ if __name__ == "__main__":
         from .receipt import receipt_key
         args.receipt_key = receipt_key(args.writer_service, args.writer_namespace, args.writer_ca)
     os.umask(0o022)
+    rules = []
     if args.harness:
-        publish_harness(Path("/volume"), Path("/bom"), *args.harness)
-    result = publish(Path("/volume"), shared.tool_gate_identity(args.owner, args.subject, args.workspace, args.sandbox), args.receipt_key, model=args.model, generation=args.model_generation, browser=bool(args.browser_proof))
+        from .harness import tool_rules
+        rules = tool_rules(publish_harness(Path("/volume"), Path("/bom"), *args.harness))
+    result = publish(Path("/volume"), shared.tool_gate_identity(args.owner, args.subject, args.workspace, args.sandbox), args.receipt_key, model=args.model, generation=args.model_generation, browser=bool(args.browser_proof), harness_rules=rules)
     if args.browser_proof:
         publish_browser_proof(Path("/volume/bundle"), Path(args.browser_proof).read_bytes())
     print(result)
