@@ -409,6 +409,13 @@ def test_a_thinking_level_marks_the_model_as_reasoning_and_sets_its_default(
     assert models == [{"id": MODEL, "name": MODEL, "contextWindow": 128000, "reasoning": True,
                        "compat": {"supportedReasoningEfforts": ["low", "medium", "high"]}},
                       {"id": "other"}]
+    # off marks the model as not reasoning, so no reasoning_effort is sent.
+    notebook(profiles).inference["thinking"] = "off"
+    ab.ProfileApplier(ab.Shell(), config, resolve(ab, profiles, custom_secrets)).apply(profiles)
+    cfg = fake_env.openshell_state()["sandboxes"]["default/notebook"]["openclawConfig"]
+    assert cfg["models.providers.custom-inference.models"][0] == {
+        "id": MODEL, "name": MODEL, "contextWindow": 128000, "reasoning": False}
+    assert cfg["agents.defaults.models"][model_id] == {"params": {"thinking": "off"}}
     # Removing the level stops it applying.
     del notebook(profiles).inference["thinking"]
     ab.ProfileApplier(ab.Shell(), config, resolve(ab, profiles, custom_secrets)).apply(profiles)

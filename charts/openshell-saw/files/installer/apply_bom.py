@@ -3977,8 +3977,9 @@ class ProfileApplier:
         except ValueError as exc:
             raise InstallerError(f"cannot read OpenClaw managed models: {exc}") from None
         thinking = (sb.inference_values or {}).get("thinking", "")
-        if thinking and thinking != "off":
-            self.mark_reasoning_model(exec_cmd, oc_env, provider.type, model_id)
+        if thinking:
+            self.mark_reasoning_model(exec_cmd, oc_env, provider.type, model_id,
+                                      reasoning=thinking != "off")
         if (sb.inference_values or {}).get("models") or previous or thinking:
             current_models = self.cli(*exec_cmd, "sh", "-c",
                                      f"{oc_env} openclaw config get agents.defaults --json",
@@ -4067,12 +4068,13 @@ class ProfileApplier:
         self.clear_confinement_stop(ws, sb)
         self.install_keepalive(ws, sb)
 
-    def mark_reasoning_model(self, exec_cmd, oc_env, provider_type, model_id):
-        """Let OpenClaw offer thinking levels for a custom provider's model.
+    def mark_reasoning_model(self, exec_cmd, oc_env, provider_type, model_id, reasoning=True):
+        """Set whether OpenClaw treats a custom provider's model as reasoning.
 
         OpenClaw knows which of its own models reason; a custom model offers
         only default and off unless its entry says reasoning: true and lists
-        the efforts the endpoint accepts (sent as reasoning_effort)."""
+        the efforts the endpoint accepts (sent as reasoning_effort). Thinking
+        off marks it reasoning: false, so no effort is sent."""
         key = f"models.providers.{shlex.quote(provider_type)}.models"
         found = self.cli(*exec_cmd, "sh", "-c", f"{oc_env} openclaw config get {key} --json",
                          check=False, quiet=True)
@@ -4089,10 +4091,16 @@ class ProfileApplier:
                 "applies only if OpenClaw already treats it as a reasoning model")
             return
         compat = entry.setdefault("compat", {})
-        if entry.get("reasoning") is True and compat.get("supportedReasoningEfforts") == REASONING_EFFORTS:
+        efforts = REASONING_EFFORTS if reasoning else None
+        if entry.get("reasoning") is reasoning and compat.get("supportedReasoningEfforts") == efforts:
             return
-        entry["reasoning"] = True
-        compat["supportedReasoningEfforts"] = REASONING_EFFORTS
+        entry["reasoning"] = reasoning
+        if reasoning:
+            compat["supportedReasoningEfforts"] = REASONING_EFFORTS
+        else:
+            compat.pop("supportedReasoningEfforts", None)
+            if not compat:
+                entry.pop("compat")
         self.cli(*exec_cmd, "sh", "-c",
                  f"{oc_env} openclaw config set {key} {shlex.quote(json.dumps(models))}")
 
