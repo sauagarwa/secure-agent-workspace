@@ -428,3 +428,11 @@ def test_an_unknown_thinking_level_is_refused(ab, profiles, level):
     sb = notebook(profiles)
     sb.inference["thinking"] = level
     assert any("thinking must be one of" in p for p in ab.sandbox_inference_problems(sb, {"custom-inference": "custom-inference"}))
+
+
+def test_an_unquoted_yaml_off_means_off(ab):
+    """YAML 1.1 reads `thinking: off` as false; it still means off."""
+    files = profile_files("custom-inference")
+    key = next(k for k in files if k.endswith("__sandbox.yaml"))
+    files[key] = files[key].replace('timeoutSeconds: "300"', 'timeoutSeconds: "300"\n        thinking: off')
+    assert notebook(ab.parse_profiles(files)).inference["thinking"] == "off"

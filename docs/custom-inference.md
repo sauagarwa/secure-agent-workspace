@@ -151,7 +151,8 @@ stated (`openai`): the installer cannot infer it for a profile of your own.
   `high`) to make that level the model's default. Any level but `off` also
   marks the model as a reasoning model accepting `low`, `medium` and `high`,
   which OpenClaw sends as `reasoning_effort`; the endpoint may ignore it.
-  `off` marks it `reasoning: false` instead (like `MODEL_REASONING=false`). A
+  `off` marks it `reasoning: false` instead (like `MODEL_REASONING=false`); an
+  unquoted YAML `off` (read as `false`) also means off. A
   chat's `/think` still overrides the default. VM workspaces only for now.
 
 ### Keycloak compatibility

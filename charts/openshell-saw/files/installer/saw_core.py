@@ -418,6 +418,7 @@ def validate_profile_document(doc, kind, where="profile"):
                 raise InstallerError(f"{where}: inference.providerRef must be a string")
             if "protocol" in inference and not isinstance(inference["protocol"], str):
                 raise InstallerError(f"{where}: inference.protocol must be a string")
+            inference = _thinking_off(inference)
             if "thinking" in inference and inference["thinking"] not in THINKING_LEVELS:
                 raise InstallerError(f"{where}: inference.thinking must be one of "
                                      + ", ".join(THINKING_LEVELS))
@@ -514,7 +515,7 @@ def parse_profiles(files, *, strict=False, document_check=None):
                         harness_ref=dict(s.get("harnessRef") or {}),
                         ui=dict(s.get("ui") or {}),
                         env=s.get("env") if s.get("env") is not None else {},
-                        inference=s.get("inference") if s.get("inference") is not None else {},
+                        inference=_thinking_off(s.get("inference") if s.get("inference") is not None else {}),
                         gpu_enabled=gpu_enabled, gpu_count=gpu_count))
             profile.workspaces.append(ws)
         profiles.append(profile)
@@ -722,6 +723,13 @@ def secret_ref_problems(src):
     if set(src["secretKeyRef"]) - {"name", "key"}:
         out.append("secretKeyRef takes only name and key")
     return out
+
+
+def _thinking_off(inference):
+    """YAML reads an unquoted `thinking: off` as false; it means off."""
+    if isinstance(inference, dict) and inference.get("thinking") is False:
+        return {**inference, "thinking": "off"}
+    return inference
 
 
 INFERENCE_KEYS = {"providerRef", "protocol", "baseUrl", "model", "models", "timeoutSeconds", "thinking"}
