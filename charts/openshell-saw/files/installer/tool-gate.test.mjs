@@ -159,7 +159,7 @@ test("identity configuration always requires approval, including file and avatar
 
 test("both automation aliases allow only inspection and hold mutations for approval", () => {
   for (const group of ["cron", "automations"]) {
-    for (const verb of ["list", "status", "get", "show", "runs"]) {
+    for (const verb of ["list", "status", "get", "show", "runs", "--help"]) {
       const result = call({ params: { command: `openclaw ${group} ${verb} --json` } });
       assert.equal(result.effect.kind, "allow");
       assert.equal(result.record.rule, "exec-openclaw-automation-inspect");
@@ -576,4 +576,20 @@ test("allowAlways is only valid as true on an approval rule", () => {
   assert.equal(parsePolicy(rule("approval", "true")).rules[0].allowAlways, true);
   assert.throws(() => parsePolicy(rule("allow", "true")), /allowAlways/);
   assert.throws(() => parsePolicy(rule("approval", "yes")), /allowAlways/);
+});
+
+test("a trailing 2>&1 is accepted, and blocked exec calls say how to retry", () => {
+  for (const command of ["openclaw automations list --all 2>&1", "git status 2>&1 2>&1", "git status\t2>&1 "]) {
+    assert.equal(call({ params: { command } }).effect.kind, "allow", command);
+  }
+  // Only a trailing stderr merge: any other redirect or chain is still opaque.
+  for (const command of ["git status 2>&1 | head", "git status > /tmp/x 2>&1", "git status 2>&1; rm -rf /",
+    "git status 2>/tmp/x", "git status 2>&1\nrm -rf /", "git status &>/tmp/x"]) {
+    assert.equal(call({ params: { command } }).record.rule, "exec-opaque", command);
+  }
+  const opaque = call({ params: { command: "openclaw automations show a; openclaw automations show b" } });
+  assert.match(opaque.effect.blockReason, /exec-opaque\. Run one command per exec call/);
+  const unlisted = call({ params: { command: "openclaw automations scratch" } });
+  assert.match(unlisted.effect.blockReason, /not on the allowed list/);
+  assert.match(call({ toolName: "web_fetch", params: {} }).effect.blockReason, /^Tool web_fetch is denied by the default action$/);
 });

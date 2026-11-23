@@ -153,6 +153,8 @@ export function commandText(params) {
 
 function normalizedExec(command) {
   if (!command.trim()) return { error: "exec-unreadable" };
+  // A trailing 2>&1 only merges stderr into stdout; agents add it out of habit.
+  command = command.replace(/(?:[ \t]+2>&1)+[ \t]*$/, "");
   if (/[;&|`\n\r<>]|\$\(|\$\{/.test(command)) return { error: "exec-opaque" };
   const words = command.trim().split(/\s+/);
   const assignments = [];
@@ -212,11 +214,21 @@ function baseRecord(input, extras) {
   };
 }
 
+// Said back to the agent with a denial so it can retry in an accepted form
+// instead of guessing.
+const EXEC_HINTS = {
+  "exec-unreadable": "Send the command as one plain string.",
+  "exec-opaque": "Run one command per exec call, with no ;, &&, |, backticks, $(...), "
+    + "redirects or shell wrappers such as sh -c (a trailing 2>&1 is fine). "
+    + "Each command is checked on its own.",
+};
+
 function effectFor(action, tool, ruleId, allowAlways = false) {
   if (action === "allow") return { kind: "allow" };
   if (action === "deny") {
     const why = ruleId === "default"
-      ? `Tool ${tool} is denied by the default action`
+      ? `Tool ${tool} is denied by the default action${tool === "exec"
+        ? ": this command is not on the allowed list, so do not retry it in another form" : ""}`
       : `Tool ${tool} is denied by rule ${ruleId}`;
     return { kind: "deny", blockReason: why };
   }
@@ -286,7 +298,7 @@ export function decide(input) {
   const task = { id: session, title };
   const rawCommand = commandText(input.params);
   const exec = tool === "exec" ? normalizedExec(rawCommand) : null;
-  if (exec?.error) return blocked(input, exec.error, `Tool call blocked: ${exec.error}`, task);
+  if (exec?.error) return blocked(input, exec.error, `Tool call blocked: ${exec.error}. ${EXEC_HINTS[exec.error]}`, task);
   const command = exec ? exec.command : rawCommand;
   const rule = policy.rules.find((item) => ruleMatches(item, tool, command));
   const action = rule ? rule.action : policy.defaultAction;
