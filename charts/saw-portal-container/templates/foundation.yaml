@@ -31,7 +31,9 @@ metadata: {name: default-deny, namespace: {{ $runtime }}, annotations: {argocd.a
 spec: {podSelector: {}, policyTypes: [Ingress, Egress], ingress: [], egress: []}
 {{- $customSecret := "" }}
 {{- $sources := dict }}
-{{- range required "explicit credential bindings required" (.Values.site | default dict).credentialBindings }}
+{{- /* helm lint turns required into a warning and yields "", which range cannot iterate. */}}
+{{- $bindings := required "explicit credential bindings required" (.Values.site | default dict).credentialBindings }}
+{{- range ($bindings | default list) }}
 {{- if eq .type "custom-inference" }}{{- $customSecret = .secret }}{{- end }}
 {{- $fields := append (get $sources .secret | default list) .key }}
 {{- if .refresh }}{{- $fields = concat $fields (list "client_id" "client_secret" "refresh_token") }}{{- end }}
