@@ -64,7 +64,8 @@ def test_profile_is_valid_and_reads_url_and_model_from_the_secret(ab, profiles, 
     # ...the endpoint and model are the sandbox's (the URL normalised).
     sb = notebook(profiles)
     assert sb.inference_values == {"providerRef": "custom-inference", "protocol": "openai",
-                                   "baseUrl": URL, "model": MODEL, "timeoutSeconds": 300}
+                                   "baseUrl": URL, "model": MODEL, "timeoutSeconds": 300,
+                                   "thinking": "medium"}
     assert (ab.sandbox_endpoint(sb, custom), ab.sandbox_model(sb, custom)) == (URL, MODEL)
 
 
