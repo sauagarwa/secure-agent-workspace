@@ -200,7 +200,7 @@ class Sandbox:
     # (the agent, and argv, can read these): those stay on providers.
     env: dict = field(default_factory=dict)
     # `inference:` -- how the agent reaches its model: {providerRef, protocol,
-    # baseUrl?, model, models?, timeoutSeconds?}. models maps optional native
+    # baseUrl?, model, models?, timeoutSeconds?, thinking?}. models maps optional native
     # provider names to additional chat model inputs. baseUrl/model/timeoutSeconds
     # is a literal or an input ({secretKeyRef: {name, key}, default?,
     # required?, title?}); inference_values is it resolved. The installer onboards the
@@ -418,6 +418,9 @@ def validate_profile_document(doc, kind, where="profile"):
                 raise InstallerError(f"{where}: inference.providerRef must be a string")
             if "protocol" in inference and not isinstance(inference["protocol"], str):
                 raise InstallerError(f"{where}: inference.protocol must be a string")
+            if "thinking" in inference and inference["thinking"] not in THINKING_LEVELS:
+                raise InstallerError(f"{where}: inference.thinking must be one of "
+                                     + ", ".join(THINKING_LEVELS))
             for field_name in ("model", "baseUrl", "timeoutSeconds"):
                 kinds = (str, int) if field_name == "timeoutSeconds" else (str,)
                 if field_name in inference:
@@ -721,7 +724,12 @@ def secret_ref_problems(src):
     return out
 
 
-INFERENCE_KEYS = {"providerRef", "protocol", "baseUrl", "model", "models", "timeoutSeconds"}
+INFERENCE_KEYS = {"providerRef", "protocol", "baseUrl", "model", "models", "timeoutSeconds", "thinking"}
+# OpenClaw thinking levels a profile may make the model's default. A level
+# other than off also marks the model as a reasoning model that accepts
+# these efforts, which OpenClaw only assumes for its own known models.
+THINKING_LEVELS = ("off", "minimal", "low", "medium", "high")
+REASONING_EFFORTS = ["low", "medium", "high"]
 
 
 # A profile controls allowed credential destinations; the protocol controls
@@ -948,6 +956,8 @@ def resolve_inference(ws, sb, read_value, validate_endpoint, forbidden=()):
     if timeout and (not str(timeout).isdigit() or int(timeout) < 0):
         raise InstallerError(f"{where}: inference timeoutSeconds must be a non-negative integer")
     out["timeoutSeconds"] = int(timeout) if timeout else 0
+    if spec.get("thinking"):
+        out["thinking"] = spec["thinking"]
     if "models" in spec:
         out["models"] = {}
         for name, src in spec["models"].items():
@@ -1007,6 +1017,11 @@ def sandbox_inference_problems(sb, provider_types, declared_provider_types=None)
     for key in ("baseUrl", "model"):
         if key in spec:
             out += [f"inference {key} {p}" for p in input_problems(spec[key])]
+    if "thinking" in spec:
+        if spec["thinking"] not in THINKING_LEVELS:
+            out.append(f"inference thinking must be one of {', '.join(THINKING_LEVELS)}")
+        elif sb.type != "openclaw":
+            out.append("inference thinking is supported only for openclaw sandboxes")
     models = spec.get("models", {})
     if not isinstance(models, dict):
         out.append("inference models must be a mapping of provider names to model inputs")
@@ -1058,7 +1073,7 @@ __all__ = (
     'SANDBOX_TYPES', 'BASE_URL_CONFIG_KEYS', 'InstallerError', 'Provider', 'Sandbox', 'Workspace',
     'Profile', 'HarnessBundle', 'read_profile_files', '_yaml', 'parse_profiles', 'enabled_workspaces',
     'validate_profiles', 'ENV_NAME_RE', 'CREDENTIAL_NAME_RE', 'ENV_VALUE_LIMIT', 'SANDBOX_ENV_KEYS',
-    'INPUT_KEYS', 'secret_ref', 'secret_ref_problems', 'INFERENCE_KEYS', 'INFERENCE_PROTOCOLS',
+    'INPUT_KEYS', 'secret_ref', 'secret_ref_problems', 'INFERENCE_KEYS', 'INFERENCE_PROTOCOLS', 'THINKING_LEVELS', 'REASONING_EFFORTS',
     'PROVIDER_PROTOCOLS', 'check_env_value', 'sandbox_env_problems', 'input_problems',
     'check_base_url', 'resolve_bom_input', 'resolve_inference', 'inference_protocol', 'sandbox_inference_problems', 'harness_from_plan', 'profiles_from_plan',
     'validate_profile_document', 'apply_workspace_sequence', 'select_inference_provider',
