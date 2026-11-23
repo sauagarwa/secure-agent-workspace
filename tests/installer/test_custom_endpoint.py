@@ -398,7 +398,7 @@ def test_a_thinking_level_marks_the_model_as_reasoning_and_sets_its_default(
     state = fake_env.openshell_state()
     sb = state["sandboxes"]["default/notebook"]
     model_id = f"custom-inference/{MODEL}"
-    assert sb["openclawConfig"]["agents.defaults.models"][model_id] == {"params": {"thinking": "off"}}
+    assert sb["openclawConfig"]["agents.defaults.models"][model_id] == {"params": {"thinking": "medium"}}
     # Onboarding wrote the model entry; a rerun marks it as a reasoning model.
     sb["openclawConfig"]["models.providers.custom-inference.models"] = [
         {"id": MODEL, "name": MODEL, "contextWindow": 128000}, {"id": "other"}]
