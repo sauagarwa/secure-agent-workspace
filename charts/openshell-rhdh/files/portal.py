@@ -880,8 +880,41 @@ def check_live_boundary_approval(k8s, user, site, mode, profile, catalog):
                  "sandboxPlacementBinding")
 
 
+def credential_bindings(entry):
+    """Which Secret key backs which OpenShell provider type for one profile.
+
+    Mirrors the saw-users.credentialBindings helper, which renders the same
+    list into the site once the workspace is created.
+    """
+    keys = {}
+    for name, spec in (entry.get("secrets") or {}).items():
+        fields = list(spec.get("fields") or [])
+        refresh = spec.get("refresh") or {}
+        if refresh:
+            fields.append({"key": refresh.get("credentialKey"), "kind": "secret", "refresh": True})
+        for field in fields:
+            if field.get("kind") != "secret" or field.get("refreshMaterial"):
+                continue
+            binding = keys.setdefault((name, field["key"]), {"providers": [], "refresh": False})
+            for provider in spec.get("providers") or []:
+                for kind in [provider] + (["build"] if provider == "nvidia" else []):
+                    if kind not in binding["providers"]:
+                        binding["providers"].append(kind)
+            binding["refresh"] = binding["refresh"] or bool(field.get("refresh"))
+    bindings = []
+    for (name, key), binding in sorted(keys.items()):
+        for kind in binding["providers"]:
+            item = {"secret": name, "key": key, "type": kind}
+            if binding["refresh"]:
+                item["refresh"] = "oauth2_refresh_token"
+            bindings.append(item)
+    return bindings
+
+
 def check_workspace_preflight(k8s, user, site, mode, profile, catalog):
     """Run read-only platform gates before reserving or writing keys."""
+    if "credentialBindings" not in site:
+        site = {**site, "credentialBindings": credential_bindings(catalog[profile])}
     observations = _preflight.configuration_facts(site)
     observations["api"] = True
     try:

@@ -242,6 +242,18 @@ def catalog(portal):
     return portal.load_catalog(CATALOG)
 
 
+def test_preflight_gets_the_bindings_the_chart_renders(portal, catalog):
+    # Same list as saw-users.credentialBindings: nvidia also serves build,
+    # and a refreshable credential is marked for OpenShell's refresh flow.
+    assert portal.credential_bindings(catalog["personal-assistant"]) == [
+        {"secret": "gmail", "key": "access_token", "type": "gmail", "refresh": "oauth2_refresh_token"},
+        {"secret": "inference", "key": "api_key", "type": "nvidia"},
+        {"secret": "inference", "key": "api_key", "type": "build"},
+        {"secret": "slack", "key": "bot_token", "type": "slack"},
+    ]
+    assert portal.credential_bindings({}) == []
+
+
 def test_a_request_gets_the_profiles_secrets(portal, catalog):
     profile, secrets = portal.parse_request({
         "profile": "data-science", "inference.api_key": " nvapi-1 ", "web-search.api_key": "brave-1",
