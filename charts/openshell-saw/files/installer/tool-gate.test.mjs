@@ -520,3 +520,60 @@ test("an unavailable audit file blocks an otherwise allowed call", () => {
   assert.equal(result.record.rule, "audit-unwritable");
   assert.equal(result.hook.block, true);
 });
+
+test("allow always skips later automation approvals but never other rules", () => {
+  const remembered = new Set();
+  const records = [];
+  const run = (command) => evaluateToolCall({
+    policyText, identity, toolName: "exec", params: { command }, sessionKey: "session-1",
+    appendRecord: (record) => records.push(record), remembered,
+  });
+  const first = run("openclaw cron rm job-1");
+  assert.deepEqual(first.hook.requireApproval.allowedDecisions, ["allow-once", "allow-always", "deny"]);
+  // Allow once remembers nothing.
+  first.hook.requireApproval.onResolution("allow-once");
+  assert.ok(run("openclaw cron edit job-1").hook.requireApproval);
+  run("openclaw cron add --name x").hook.requireApproval.onResolution("allow-always");
+  // Later automation changes run, in any session, and are still audited.
+  for (const command of ["openclaw cron rm job-1", "openclaw automations edit job-2"]) {
+    records.length = 0;
+    assert.equal(run(command).hook, undefined);
+    assert.equal(records[0].decision, "allow");
+    assert.equal(records[0].rule, "exec-openclaw-automation-change");
+    assert.deepEqual(records[0].approval, { mode: "remembered", resolution: "allow-always" });
+  }
+  // Other approval rules still ask, and offer no allow always.
+  const push = run("git push");
+  assert.deepEqual(push.hook.requireApproval.allowedDecisions, ["allow-once", "deny"]);
+  push.hook.requireApproval.onResolution("allow-always");
+  assert.ok(run("git push").hook.requireApproval);
+  // Unmatched commands are still denied.
+  assert.equal(run("openclaw cron remove job-1").hook.block, true);
+});
+
+test("allow always is forgotten when the policy changes or the answer is not recorded", () => {
+  const remembered = new Set();
+  const changed = policyText.replace("defaultAction: deny", "defaultAction: deny\n# changed");
+  const run = (text, append) => evaluateToolCall({
+    policyText: text, identity, toolName: "exec", params: { command: "openclaw cron rm job-1" },
+    sessionKey: "session-1", appendRecord: append, remembered,
+  });
+  run(policyText, () => {}).hook.requireApproval.onResolution("allow-always");
+  assert.equal(run(policyText, () => {}).hook, undefined);
+  assert.ok(run(changed, () => {}).hook.requireApproval);
+  const unrecorded = new Set();
+  const failing = evaluateToolCall({
+    policyText, identity, toolName: "exec", params: { command: "openclaw cron rm job-1" },
+    sessionKey: "session-1", remembered: unrecorded,
+    appendRecord: (record) => { if (record.approval) throw new Error("down"); },
+  });
+  failing.hook.requireApproval.onResolution("allow-always");
+  assert.equal(unrecorded.size, 0);
+});
+
+test("allowAlways is only valid as true on an approval rule", () => {
+  const rule = (action, value) => `version: 1\ndefaultAction: deny\nrules:\n  - id: r\n    tool: exec\n    action: ${action}\n    allowAlways: ${value}\n`;
+  assert.equal(parsePolicy(rule("approval", "true")).rules[0].allowAlways, true);
+  assert.throws(() => parsePolicy(rule("allow", "true")), /allowAlways/);
+  assert.throws(() => parsePolicy(rule("approval", "yes")), /allowAlways/);
+});

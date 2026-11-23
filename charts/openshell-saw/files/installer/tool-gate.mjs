@@ -102,6 +102,12 @@ export function parsePolicy(text) {
     ids.add(rule.id);
     if (typeof rule.tool !== "string" || !rule.tool) throw new Error(`rule ${rule.id} needs a tool`);
     if (!ACTIONS.has(rule.action)) throw new Error(`rule ${rule.id} has an unknown action`);
+    if (rule.allowAlways !== undefined) {
+      if (rule.allowAlways !== "true" || rule.action !== "approval") {
+        throw new Error(`rule ${rule.id}: allowAlways must be true on an approval rule`);
+      }
+      rule.allowAlways = true;
+    }
     if (rule.whenCommandMatches !== undefined) {
       if (!Array.isArray(rule.whenCommandMatches) || rule.whenCommandMatches.length === 0) {
         throw new Error(`rule ${rule.id} has an empty whenCommandMatches`);
@@ -206,7 +212,7 @@ function baseRecord(input, extras) {
   };
 }
 
-function effectFor(action, tool, ruleId) {
+function effectFor(action, tool, ruleId, allowAlways = false) {
   if (action === "allow") return { kind: "allow" };
   if (action === "deny") {
     const why = ruleId === "default"
@@ -221,7 +227,7 @@ function effectFor(action, tool, ruleId) {
       description: `Tool ${tool} matches ${ruleId} and needs approval before it runs.`,
       severity: "warning",
       timeoutMs: 120000,
-      allowedDecisions: ["allow-once", "deny"],
+      allowedDecisions: allowAlways ? ["allow-once", "allow-always", "deny"] : ["allow-once", "deny"],
     },
   };
 }
@@ -285,9 +291,21 @@ export function decide(input) {
   const rule = policy.rules.find((item) => ruleMatches(item, tool, command));
   const action = rule ? rule.action : policy.defaultAction;
   const ruleId = rule ? rule.id : "default";
+  // "Allow always" on an allowAlways rule lets later matching calls run
+  // without asking while this gateway runs. Keyed by the policy hash, so a
+  // policy change asks again. Every call is still audited.
+  const rememberKey = rule && rule.allowAlways ? `${policyHash}:${ruleId}` : null;
+  if (rememberKey && input.remembered && input.remembered.has(rememberKey)) {
+    return {
+      record: { ...baseRecord(input, { task, rule: ruleId, policyHash, decision: "allow" }),
+        approval: { mode: "remembered", resolution: "allow-always" } },
+      effect: { kind: "allow" },
+    };
+  }
   return {
     record: baseRecord(input, { task, rule: ruleId, policyHash, decision: decisionName(action) }),
-    effect: effectFor(action, tool, ruleId),
+    effect: effectFor(action, tool, ruleId, Boolean(rememberKey)),
+    rememberKey,
   };
 }
 
@@ -354,9 +372,13 @@ export function parseIdentity(text) {
   }
 }
 
+// Rules the signed-in user answered "Allow always" for, for this gateway process.
+const REMEMBERED = new Set();
+
 // The before_tool_call hook without the OpenClaw import. A thrown audit write
 // blocks the call. onResolution appends a second line and does not execute.
 export function evaluateToolCall(input) {
+  const remembered = input.remembered || REMEMBERED;
   const identity = input.identityText !== undefined ? parseIdentity(input.identityText) : input.identity;
   const decided = decide({
     policyText: input.policyText,
@@ -368,6 +390,7 @@ export function evaluateToolCall(input) {
     sessionKey: input.sessionKey,
     sessionId: input.sessionId,
     now: input.now,
+    remembered,
   });
   const append = input.appendRecord || (input.auditFile && (record => appendAudit(input.auditFile, record)));
   if (append) {
@@ -383,9 +406,16 @@ export function evaluateToolCall(input) {
     }
   }
   const hook = hookResult(decided, (resolution) => {
-    if (!append) return;
+    const remember = () => {
+      if (resolution === "allow-always" && decided.rememberKey) remembered.add(decided.rememberKey);
+    };
+    if (!append) {
+      remember();
+      return;
+    }
     try {
       append(resolutionRecord(decided.record, resolution));
+      remember();
     } catch {
       const record = { ...resolutionRecord(decided.record, resolution), auditWriteFailed: true };
       process.stderr.write(`${JSON.stringify(record)}\n`);

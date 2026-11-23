@@ -47,9 +47,12 @@ rules:
       - openclaw automations get
       - openclaw automations show
       - openclaw automations runs
+  # "Allow always" skips the card for later automation changes until the
+  # gateway restarts; each call is still audited.
   - id: exec-openclaw-automation-change
     tool: exec
     action: approval
+    allowAlways: true
     whenCommandMatches:
       - openclaw cron add
       - openclaw cron create
