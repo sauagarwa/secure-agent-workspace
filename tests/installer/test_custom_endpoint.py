@@ -65,7 +65,7 @@ def test_profile_is_valid_and_reads_url_and_model_from_the_secret(ab, profiles, 
     sb = notebook(profiles)
     assert sb.inference_values == {"providerRef": "custom-inference", "protocol": "openai",
                                    "baseUrl": URL, "model": MODEL, "timeoutSeconds": 300,
-                                   "thinking": "medium"}
+                                   "thinking": "off"}
     assert (ab.sandbox_endpoint(sb, custom), ab.sandbox_model(sb, custom)) == (URL, MODEL)
 
 
@@ -398,7 +398,7 @@ def test_a_thinking_level_marks_the_model_as_reasoning_and_sets_its_default(
     state = fake_env.openshell_state()
     sb = state["sandboxes"]["default/notebook"]
     model_id = f"custom-inference/{MODEL}"
-    assert sb["openclawConfig"]["agents.defaults.models"][model_id] == {"params": {"thinking": "medium"}}
+    assert sb["openclawConfig"]["agents.defaults.models"][model_id] == {"params": {"thinking": "off"}}
     # Onboarding wrote the model entry; a rerun marks it as a reasoning model.
     sb["openclawConfig"]["models.providers.custom-inference.models"] = [
         {"id": MODEL, "name": MODEL, "contextWindow": 128000}, {"id": "other"}]

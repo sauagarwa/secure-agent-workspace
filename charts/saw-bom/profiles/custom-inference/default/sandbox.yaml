@@ -31,7 +31,7 @@ spec:
           title: Model
         # Self-hosted models can take longer than the agent's default.
         timeoutSeconds: "300"
-        # The model's default thinking level (a chat's /think overrides it).
-        thinking: medium
+        # Not a reasoning model (MODEL_REASONING=false): no reasoning_effort is sent.
+        thinking: off
       ui:
         route: true
