@@ -159,12 +159,12 @@ test("identity configuration always requires approval, including file and avatar
 
 test("both automation aliases allow only inspection and hold mutations for approval", () => {
   for (const group of ["cron", "automations"]) {
-    for (const verb of ["list", "status", "get", "show", "runs", "--help"]) {
+    for (const verb of ["list", "status", "get", "show", "runs", "--help", "edit --help", "rm --help"]) {
       const result = call({ params: { command: `openclaw ${group} ${verb} --json` } });
       assert.equal(result.effect.kind, "allow");
       assert.equal(result.record.rule, "exec-openclaw-automation-inspect");
     }
-    for (const verb of ["add", "create", "edit", "rm", "enable", "disable", "run"]) {
+    for (const verb of ["add", "create", "edit", "rm", "remove", "delete", "enable", "disable", "run"]) {
       const result = call({ params: { command: `openclaw ${group} ${verb} job-id` } });
       assert.equal(result.effect.kind, "approval");
       assert.equal(result.record.rule, "exec-openclaw-automation-change");
@@ -175,7 +175,7 @@ test("both automation aliases allow only inspection and hold mutations for appro
       }
     }
     // Unsupported aliases, mixed read/write surfaces and unknown verbs stay denied.
-    for (const verb of ["", "remove", "delete", "scratch", "listx", "runsx", "run-all"]) {
+    for (const verb of ["", "scratch", "bind", "listx", "runsx", "run-all", "removex"]) {
       assert.equal(call({ params: { command: `openclaw ${group} ${verb}` } }).effect.kind, "deny");
     }
     for (const command of [
@@ -548,7 +548,7 @@ test("allow always skips later automation approvals but never other rules", () =
   push.hook.requireApproval.onResolution("allow-always");
   assert.ok(run("git push").hook.requireApproval);
   // Unmatched commands are still denied.
-  assert.equal(run("openclaw cron remove job-1").hook.block, true);
+  assert.equal(run("openclaw cron update job-1").hook.block, true);
 });
 
 test("allow always is forgotten when the policy changes or the answer is not recorded", () => {
@@ -591,5 +591,9 @@ test("a trailing 2>&1 is accepted, and blocked exec calls say how to retry", () 
   assert.match(opaque.effect.blockReason, /exec-opaque\. Run one command per exec call/);
   const unlisted = call({ params: { command: "openclaw automations scratch" } });
   assert.match(unlisted.effect.blockReason, /not on the allowed list/);
+  // A wrong spelling learns the accepted ones for the same command family.
+  const remove = call({ params: { command: "openclaw automations update 69f1c7c1" } }).effect.blockReason;
+  assert.match(remove, /Accepted `openclaw automations` commands: list, status, get, show, runs, --help \(run directly\); add, create, edit, rm, remove, delete, enable, disable, run \(ask the user for approval\)$/);
+  assert.doesNotMatch(call({ params: { command: "curl https://x" } }).effect.blockReason, /Accepted/);
   assert.match(call({ toolName: "web_fetch", params: {} }).effect.blockReason, /^Tool web_fetch is denied by the default action$/);
 });

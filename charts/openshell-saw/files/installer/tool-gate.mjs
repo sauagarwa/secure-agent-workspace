@@ -223,12 +223,34 @@ const EXEC_HINTS = {
     + "Each command is checked on its own.",
 };
 
-function effectFor(action, tool, ruleId, allowAlways = false) {
+// For an unlisted exec command, the accepted commands that start with the
+// same two words (such as `openclaw automations`), so the agent can use the
+// right spelling instead of giving up or guessing.
+function sameFamily(policy, command) {
+  const words = command.split(" ").slice(0, 2);
+  if (words.length < 2) return "";
+  const prefix = `${words.join(" ")} `;
+  const found = { allow: [], approval: [] };
+  for (const rule of policy.rules) {
+    if (rule.tool !== "exec" || !found[rule.action]) continue;
+    for (const needle of rule.whenCommandMatches || []) {
+      const normalized = needle.toLowerCase().replace(/\s+/g, " ").trim();
+      const verb = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : "";
+      if (verb && !verb.includes(" ") && !found[rule.action].includes(verb)) found[rule.action].push(verb);
+    }
+  }
+  const parts = [];
+  if (found.allow.length) parts.push(`${found.allow.join(", ")} (run directly)`);
+  if (found.approval.length) parts.push(`${found.approval.join(", ")} (ask the user for approval)`);
+  return parts.length ? `. Accepted \`${words.join(" ")}\` commands: ${parts.join("; ")}` : "";
+}
+
+function effectFor(action, tool, ruleId, allowAlways = false, hint = "") {
   if (action === "allow") return { kind: "allow" };
   if (action === "deny") {
     const why = ruleId === "default"
       ? `Tool ${tool} is denied by the default action${tool === "exec"
-        ? ": this command is not on the allowed list, so do not retry it in another form" : ""}`
+        ? `: this command is not on the allowed list, so do not retry it in another form${hint}` : ""}`
       : `Tool ${tool} is denied by rule ${ruleId}`;
     return { kind: "deny", blockReason: why };
   }
@@ -316,7 +338,8 @@ export function decide(input) {
   }
   return {
     record: baseRecord(input, { task, rule: ruleId, policyHash, decision: decisionName(action) }),
-    effect: effectFor(action, tool, ruleId, Boolean(rememberKey)),
+    effect: effectFor(action, tool, ruleId, Boolean(rememberKey),
+      exec && !rule ? sameFamily(policy, command) : ""),
     rememberKey,
   };
 }
